@@ -6,8 +6,23 @@
     "deny": [
       "Bash(rm *)",
       "Bash(sudo *)",
+      "Bash(git push --force*)",
+      "Bash(git reset --hard*)",
+      "Bash(git clean *)",
+      "Bash(chmod -R *)",
+      "Bash(chown -R *)",
+      "Bash(dd *)",
       "Read(.env)",
-      "Read(**/.env)"
-    ]
+      "Read(**/.env)",
+      "Read(**/*.pem)",
+      "Read(**/*.key)",
+      "Read(**/id_rsa*)",
+      "Read(**/.aws/credentials)",
+      "Read(**/.npmrc)",
+      "Read(**/.netrc)",
+      "Read(**/credentials.json)",
+      "Read(~/.ssh/**)"
+    ],
+    "disableBypassPermissionsMode": "disable"
   }
 }
