@@ -1,0 +1,29 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test
+      - run: cargo build --release
+      - name: Check tag matches Cargo.toml version
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          cargo_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          if [ "$tag_version" != "$cargo_version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $cargo_version" >&2
+            exit 1
+          fi
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
