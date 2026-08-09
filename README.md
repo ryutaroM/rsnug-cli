@@ -1,25 +1,25 @@
 # rsnug
 
-AI エージェントから扱えるシークレット管理ツール。
+A secrets manager for use by AI agents.
 
-**現状はインターフェース定義のみで、各サブコマンドは未実装です。** 実行するとその旨を stderr に出して終了コード 1 を返します。
+**Currently only the interface is defined; no subcommand is implemented yet.** Running any of them prints a message to stderr and exits with code 1.
 
-## 使い方
+## Usage
 
 ```
 rsnug [OPTIONS] <COMMAND>
 
 Commands:
-  init  新しい vault を作成する
-  set   シークレットを設定する
-  get   シークレットのメタ情報を取得する
-  list  登録されているキーの一覧を表示する
+  init  Create a new vault
+  set   Set a secret
+  get   Get metadata for a secret
+  list  List the registered keys
 
 Options:
-  -f, --vault <PATH>     vault ファイルのパス
-      --format <FORMAT>  出力形式 [default: text] [possible values: text, json]
-  -h, --help             ヘルプを表示する
-  -V, --version          バージョンを表示する
+  -f, --vault <PATH>     Path to the vault file
+      --format <FORMAT>  Output format [default: text] [possible values: text, json]
+  -h, --help             Print help
+  -V, --version          Print version
 ```
 
 ```
@@ -30,39 +30,39 @@ rsnug get <KEY> [--reveal]
 rsnug list
 ```
 
-`--vault` と `--format` はグローバルオプションで、サブコマンドの後ろにも書けます。
+`--vault` and `--format` are global options and can also be written after the subcommand.
 
-## エージェント向けの契約
+## Contract with agents
 
-このツールは人間の対話利用より先に、AI エージェントからの呼び出しを想定して設計しています。以下は IF の一部として固定された約束です。
+This tool is designed for AI agents to call, ahead of interactive human use. The following are fixed promises, part of the interface itself.
 
-### 対話プロンプトを出さない
+### Never prompts interactively
 
-どの経路でもプロンプトを表示しません。TTY かどうかによる分岐も行いません。`set` の値は位置引数か `--stdin` のどちらかで必ず明示的に渡します。両方指定した場合と、どちらも指定しなかった場合はいずれも usage エラーで即座に終了します。
+No code path shows a prompt. There is no branching based on whether a TTY is attached. The value for `set` must always be given explicitly, either as a positional argument or via `--stdin`. Giving both, or giving neither, exits immediately with a usage error.
 
-このため、標準入力を繋がずに実行しても入力待ちで止まることがありません。
+As a result, running the tool without connecting standard input never hangs waiting for input.
 
-### stdout はペイロード専用
+### stdout is payload-only
 
-診断メッセージとエラーはすべて stderr に出力します。stdout に出るのはコマンドの結果だけで、`--format json` を指定した場合は単一の JSON 値のみです。失敗時は stdout が空になるため、「空出力かつ非ゼロ終了」を一律にエラーとして扱えます。
+All diagnostic messages and errors go to stderr. stdout carries only the command's result — a single JSON value when `--format json` is given. stdout is empty on failure, so "empty output plus a non-zero exit code" can uniformly be treated as an error.
 
-### 終了コード
+### Exit codes
 
-| code | 意味 |
+| code | meaning |
 | --- | --- |
-| 0 | 成功 |
-| 1 | 一般エラー（未実装のサブコマンドを含む） |
-| 2 | usage エラー（引数の不足・衝突・未知のコマンド） |
-| 3 | キーが存在しない |
-| 4 | vault が未初期化、または認証に失敗した |
+| 0 | success |
+| 1 | general error (including an unimplemented subcommand) |
+| 2 | usage error (missing/conflicting arguments, unknown command) |
+| 3 | key does not exist |
+| 4 | vault is uninitialized, or authentication failed |
 
-### `get` は既定で値を伏せる
+### `get` hides the value by default
 
-`get <KEY>` はキーの存在などのメタ情報のみを返し、値そのものは返しません。平文が必要な場合は `--reveal` を明示します。
+`get <KEY>` returns only metadata such as whether the key exists, not the value itself. Pass `--reveal` explicitly if you need the plaintext.
 
-エージェント経由で平文を stdout に出すと、その値が LLM のコンテキストと会話ログに残ります。既定を非露出にすることで、露出は常に呼び出し側の明示的な選択になります。同じ理由から、値をシェル履歴や `ps` に残したくない場合は位置引数ではなく `--stdin` を使ってください。
+Printing a plaintext value to stdout via an agent leaves that value in the LLM's context and conversation logs. Defaulting to non-exposure makes exposure always an explicit choice by the caller. For the same reason, use `--stdin` instead of the positional argument if you don't want the value to end up in shell history or `ps`.
 
-## 開発
+## Development
 
 ```
 cargo test
@@ -70,4 +70,4 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 ```
 
-コンテナ上で実行する場合は `docker compose run --rm dev <command>` を使います。
+To run inside a container, use `docker compose run --rm dev <command>`.
