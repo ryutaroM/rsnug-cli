@@ -8,8 +8,11 @@ Each vault is a single file, encrypted with [age](https://age-encryption.org/) u
 
 ```
 brew tap ryutaroM/rsnug
+brew trust --formula ryutarom/rsnug/rsnug
 brew install rsnug
 ```
+
+The `brew trust` step is required because this is a third-party tap; Homebrew otherwise refuses to load its formulae. See [Tap Trust](https://docs.brew.sh/Tap-Trust).
 
 ## Usage
 
