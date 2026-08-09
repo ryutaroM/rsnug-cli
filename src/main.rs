@@ -1,3 +1,3 @@
 fn main() {
-    println!("vault-cli: hello, world");
+    println!("rsnug: hello, world");
 }

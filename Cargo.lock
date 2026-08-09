@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "vault-cli"
+name = "rsnug"
 version = "0.1.0"
