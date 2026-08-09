@@ -58,6 +58,7 @@ pub enum Command {
 }
 
 impl Command {
+    #[allow(dead_code)]
     pub fn name(&self) -> &'static str {
         match self {
             Command::Init { .. } => "init",
