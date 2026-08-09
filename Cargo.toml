@@ -2,6 +2,9 @@
 name = "rsnug"
 version = "0.1.0"
 edition = "2024"
+description = "A secrets manager for use by AI agents"
+license = "MIT"
+repository = "https://github.com/ryutaroM/rsnug-cli"
 
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }
