@@ -4,6 +4,13 @@ A secrets manager for use by AI agents.
 
 Each vault is a single file, encrypted with [age](https://age-encryption.org/) using a passphrase read from the `RSNUG_PASSPHRASE` environment variable.
 
+## Installation
+
+```
+brew tap ryutaroM/rsnug
+brew install rsnug
+```
+
 ## Usage
 
 ```
