@@ -2,7 +2,7 @@
 
 A secrets manager for use by AI agents.
 
-**Currently only the interface is defined; no subcommand is implemented yet.** Running any of them prints a message to stderr and exits with code 1.
+Each vault is a single file, encrypted with [age](https://age-encryption.org/) using a passphrase read from the `RSNUG_PASSPHRASE` environment variable.
 
 ## Usage
 
@@ -30,7 +30,7 @@ rsnug get <KEY> [--reveal]
 rsnug list
 ```
 
-`--vault` and `--format` are global options and can also be written after the subcommand.
+`--vault` and `--format` are global options and can also be written after the subcommand. If `--vault` is omitted, the vault path defaults to `$XDG_CONFIG_HOME/rsnug/vault.age`, falling back to `$HOME/.config/rsnug/vault.age`.
 
 ## Contract with agents
 
@@ -42,6 +42,10 @@ No code path shows a prompt. There is no branching based on whether a TTY is att
 
 As a result, running the tool without connecting standard input never hangs waiting for input.
 
+### Passphrase comes from the environment
+
+Every command that touches the vault (including `init`) reads the passphrase from `RSNUG_PASSPHRASE`. If it is unset or empty, the command exits with code 4 without touching the filesystem.
+
 ### stdout is payload-only
 
 All diagnostic messages and errors go to stderr. stdout carries only the command's result — a single JSON value when `--format json` is given. stdout is empty on failure, so "empty output plus a non-zero exit code" can uniformly be treated as an error.
@@ -51,7 +55,7 @@ All diagnostic messages and errors go to stderr. stdout carries only the command
 | code | meaning |
 | --- | --- |
 | 0 | success |
-| 1 | general error (including an unimplemented subcommand) |
+| 1 | general error (I/O failure, `init` without `--force` on an existing vault, etc.) |
 | 2 | usage error (missing/conflicting arguments, unknown command) |
 | 3 | key does not exist |
 | 4 | vault is uninitialized, or authentication failed |
