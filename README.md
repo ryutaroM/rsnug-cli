@@ -14,6 +14,16 @@ brew install rsnug
 
 The `brew trust` step is required because this is a third-party tap; Homebrew otherwise refuses to load its formulae. See [Tap Trust](https://docs.brew.sh/Tap-Trust).
 
+## Setup
+
+rsnug reads its vault passphrase from the `RSNUG_PASSPHRASE` environment variable — it is never prompted for. Add it to your shell profile (`~/.zshrc` or `~/.bashrc`) so it's set in every session:
+
+```
+export RSNUG_PASSPHRASE="your-passphrase"
+```
+
+Then reload the shell (`source ~/.zshrc`, or open a new terminal) before running `rsnug init`.
+
 ## Usage
 
 ```
