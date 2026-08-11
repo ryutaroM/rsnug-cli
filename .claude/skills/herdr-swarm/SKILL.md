@@ -2,7 +2,7 @@
 name: herdr-swarm
 description: "Lead a swarm of Claude Code bees via herdr: one worktree per role, dispatched from a single queen pane, with bees reporting completion and problems back to the queen. Use when the user explicitly asks to use herdr for swarm/parallel delegation, or when there are multiple independent subtasks worth delegating. Do not use just because background work could help. Requires HERDR_ENV=1."
 argument-hint: "[tasks to delegate, optional]"
-allowed-tools: Bash(herdr agent list), Bash(herdr agent get *), Bash(herdr agent read *), Bash(herdr agent start *), Bash(herdr agent prompt *), Bash(herdr agent rename *), Bash(herdr agent send-keys *), Bash(herdr worktree list *), Bash(herdr worktree create *), Bash(herdr pane current *), Bash(herdr pane rename *), Bash(herdr integration status), Bash(printenv HERDR_ENV), Bash(mktemp *), Read, Write
+allowed-tools: Bash(herdr agent list), Bash(herdr agent get *), Bash(herdr agent read *), Bash(herdr agent start *), Bash(herdr agent prompt *), Bash(herdr agent rename *), Bash(herdr agent send-keys *), Bash(herdr worktree list *), Bash(herdr tab create *), Bash(herdr pane current *), Bash(herdr pane rename *), Bash(herdr integration status), Bash(git worktree add *), Bash(printenv HERDR_ENV), Bash(mktemp *), Read, Write
 ---
 
 # herdr swarm
@@ -32,16 +32,18 @@ status alone.
 
 ### Become the queen
 
-Bees address you by agent name, so you need a stable one. Take the caller's `pane_id` from
-`herdr pane current --current` — not from `$HERDR_PANE_ID`, which is captured at pane creation
-and goes stale when the session is re-created — and name that agent:
+Bees address you by agent name, so you need a stable one. Read the caller's own identity from
+`herdr pane current --current` — `.result.pane.pane_id` and `.result.pane.workspace_id`, not
+`$HERDR_PANE_ID` / `$HERDR_WORKSPACE_ID`, which are captured at pane creation and go stale or
+empty when the session is re-created — and name that agent:
 
 ```bash
-herdr agent rename <caller_pane_id> queen
+herdr agent rename <queen_pane_id> queen
 ```
 
 If `queen` is already held by a pane that is not the caller, pick `queen-<suffix>` instead.
-Use this name verbatim in every bee prompt.
+Use this name verbatim in every bee prompt. Keep `<queen_workspace_id>` too: every bee lives
+in it.
 
 ### Plan the roles
 
@@ -74,7 +76,7 @@ mktemp -d -t herdr-swarm
 ```
 
 Write a manifest there (`manifest.md`) listing each role: bee name, branch, worktree path,
-report path, workspace ID, and queue position. Update it as roles are dispatched and reports
+report path, tab and pane ID, and queue position. Update it as roles are dispatched and reports
 arrive — it is what lets you resume after the conversation is compacted.
 
 ### Name a bee
@@ -89,18 +91,21 @@ The branch is `swarm/<name>` unless the user names another prefix or a full bran
 
 ### Start a bee
 
-Base the branch on `main` unless the user asks for another base:
+Do not use `herdr worktree create`: its `--workspace` / `--cwd` select the *source* repo, not a
+destination, and it always spawns a whole new workspace — a swarm of them scatters the UI and
+buries the queen. Build the worktree and its pane separately instead.
+
+Resolve the repo root as `.result.source.repo_root` from `herdr worktree list --cwd "$PWD"`,
+and give `git` an **absolute** path. A relative one is resolved against the queen's own cwd,
+which nests the bee's worktree inside the queen's when the queen is itself in a worktree. Base
+the branch on `main` unless the user asks for another base:
 
 ```bash
-herdr worktree create --cwd "$PWD" --branch swarm/<name> --base main \
-  --path .claude/worktrees/<name> --label <name> --no-focus
+git worktree add -b swarm/<name> <repo_root>/.claude/worktrees/<name> main
 ```
 
-This creates a new workspace, tab, and root pane. Take the pane ID from
-`.result.root_pane.pane_id` in the JSON response.
-
-Now arm the bee's report hook, **before** starting the agent — settings are read at launch, so
-a file written afterwards is not picked up. Write `<worktree>/.claude/settings.local.json`:
+Now arm the bee's report hook, **before** the agent exists — settings are read at launch, so a
+file written afterwards is not picked up. Write `<worktree>/.claude/settings.local.json`:
 
 ```json
 {
@@ -125,9 +130,17 @@ simply not do it — the hook fires whether or not the bee remembers. `.claude/s
 is already ignored by git in this repo, so it never reaches the branch; confirm that before
 writing it, and if it is not ignored, tell the bee not to commit it.
 
-Then label the pane itself (`--label` only names the workspace/tab) and start the agent with a
-startup timeout large enough for a first launch. Pass no native agent arguments — the bee runs
-with its default permission behavior:
+Then give the bee a tab **in the queen's own workspace**, so the whole swarm stays in one
+place:
+
+```bash
+herdr tab create --workspace <queen_workspace_id> --cwd <repo_root>/.claude/worktrees/<name> \
+  --label <name> --no-focus
+```
+
+Take the pane from `.result.root_pane.pane_id`, label the pane itself (`--label` only names the
+tab), and start the agent with a startup timeout large enough for a first launch. Pass no
+native agent arguments — the bee runs with its default permission behavior:
 
 ```bash
 herdr pane rename <pane_id> <name>
@@ -229,7 +242,9 @@ rows are unrecoverable — re-prompt the bee to write the report file instead.
 ### Wrap up
 
 When every role has reported, summarize the results per role and list what was created so the
-user can clean up: `<name>`, branch, worktree path, workspace ID, and the run directory.
+user can clean up: `<name>`, branch, worktree path, tab ID, and the run directory. Cleanup is
+`git worktree remove <path>` plus `herdr tab close <tab_id>` — spell both out; the queen does
+not run them.
 
 Out of scope: pushing, `gh pr create`, merging to main, worktree cleanup — leave these to the
 user or the existing project workflow.
