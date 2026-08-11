@@ -27,7 +27,7 @@ pub enum Format {
 pub enum Command {
     /// Create a new vault
     Init {
-        /// Overwrite an existing vault
+        /// Overwrite an existing vault, if the passphrase opens it
         #[arg(long)]
         force: bool,
     },
@@ -53,8 +53,26 @@ pub enum Command {
         #[arg(long)]
         reveal: bool,
     },
+    /// Move a secret to the trash
+    Unset {
+        /// Key of the secret
+        key: String,
+    },
+    /// Bring a trashed secret back
+    Restore {
+        /// Key of the secret
+        key: String,
+
+        /// Restore the generation deleted at this RFC3339 timestamp (see `list --trash`)
+        #[arg(long, value_name = "TIMESTAMP", value_parser = crate::timestamp::parse)]
+        at: Option<u64>,
+    },
     /// List the registered keys
-    List,
+    List {
+        /// List the trashed keys instead
+        #[arg(long)]
+        trash: bool,
+    },
 }
 
 impl Command {
@@ -64,7 +82,9 @@ impl Command {
             Command::Init { .. } => "init",
             Command::Set { .. } => "set",
             Command::Get { .. } => "get",
-            Command::List => "list",
+            Command::Unset { .. } => "unset",
+            Command::Restore { .. } => "restore",
+            Command::List { .. } => "list",
         }
     }
 }
@@ -160,6 +180,36 @@ mod tests {
             panic!("expected get");
         };
         assert!(reveal);
+    }
+
+    #[test]
+    fn restore_accepts_an_at_selector() {
+        let Command::Restore { key, at } =
+            parse(&["restore", "KEY", "--at", "2024-01-01T00:00:00Z"])
+                .expect("should parse")
+                .command
+        else {
+            panic!("expected restore");
+        };
+        assert_eq!(key, "KEY");
+        assert_eq!(at, Some(1_704_067_200));
+    }
+
+    #[test]
+    fn restore_defaults_to_the_newest_generation() {
+        let Command::Restore { at, .. } = parse(&["restore", "KEY"]).expect("should parse").command
+        else {
+            panic!("expected restore");
+        };
+        assert_eq!(at, None);
+    }
+
+    #[test]
+    fn restore_rejects_a_malformed_at() {
+        assert_eq!(
+            kind(&["restore", "KEY", "--at", "yesterday"]),
+            ErrorKind::ValueValidation
+        );
     }
 
     #[test]

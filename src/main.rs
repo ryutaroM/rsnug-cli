@@ -4,6 +4,7 @@ mod error;
 mod exit;
 mod passphrase;
 mod render;
+mod timestamp;
 mod vault;
 
 use age::secrecy::SecretString;
@@ -47,7 +48,14 @@ fn run(cli: Cli) -> Result<String, RsnugError> {
         }
         Command::Get { key, reveal } => commands::get(&vault_path, &passphrase, &key, reveal)
             .map(|outcome| render::get(outcome, cli.format)),
-        Command::List => {
+        Command::Unset { key } => {
+            commands::unset(&vault_path, &passphrase, &key).map(|()| render::unset(key, cli.format))
+        }
+        Command::Restore { key, at } => commands::restore(&vault_path, &passphrase, &key, at)
+            .map(|()| render::restore(key, cli.format)),
+        Command::List { trash: true } => commands::list_trash(&vault_path, &passphrase)
+            .map(|entries| render::list_trash(entries, cli.format)),
+        Command::List { trash: false } => {
             commands::list(&vault_path, &passphrase).map(|keys| render::list(keys, cli.format))
         }
     }
