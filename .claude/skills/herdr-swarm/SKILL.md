@@ -97,9 +97,37 @@ herdr worktree create --cwd "$PWD" --branch swarm/<name> --base main \
 ```
 
 This creates a new workspace, tab, and root pane. Take the pane ID from
-`.result.root_pane.pane_id` in the JSON response, label the pane itself (`--label` only names
-the workspace/tab), then start the agent with a startup timeout large enough for a first
-launch. Pass no native agent arguments — the bee runs with its default permission behavior:
+`.result.root_pane.pane_id` in the JSON response.
+
+Now arm the bee's report hook, **before** starting the agent — settings are read at launch, so
+a file written afterwards is not picked up. Write `<worktree>/.claude/settings.local.json`:
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "herdr agent prompt <queen> '[swarm:<name>] turn ended — report: <report-path>' >/dev/null 2>&1 || true",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+This is what actually wakes you. A bee asked to run a command at the end of its turn may
+simply not do it — the hook fires whether or not the bee remembers. `.claude/settings.local.json`
+is already ignored by git in this repo, so it never reaches the branch; confirm that before
+writing it, and if it is not ignored, tell the bee not to commit it.
+
+Then label the pane itself (`--label` only names the workspace/tab) and start the agent with a
+startup timeout large enough for a first launch. Pass no native agent arguments — the bee runs
+with its default permission behavior:
 
 ```bash
 herdr pane rename <pane_id> <name>
@@ -133,21 +161,24 @@ self-contained and state:
 - whether to commit in its worktree (say so explicitly; it never pushes or opens a PR)
 - what it must not do: work outside its own worktree, push, read or write secrets and
   credential files, or start bees of its own
-- the reporting contract below, with `<queen>`, `<name>`, and `<report-path>` filled in
+- the reporting contract below, with `<report-path>` filled in
 
 Reporting contract to embed verbatim:
 
-> Report back exactly once, when you finish or when you get stuck. First write your full
-> report as Markdown to `<report-path>`. Then run:
+> Before you finish — whether you completed the work or got stuck — write your full report as
+> Markdown to `<report-path>`. Its first line must be exactly one of:
 >
-> ```bash
-> herdr agent prompt <queen> "[swarm:<name>] DONE — <one-line summary>"
+> ```
+> STATUS: DONE — <one-line summary>
+> STATUS: FAILED — <why you could not finish>
+> STATUS: BLOCKED — <the decision you need from the queen>
 > ```
 >
-> Use `DONE` when the definition of done is met, `FAILED` when you cannot finish, and
-> `BLOCKED` when you need a decision only the queen can make — put the question in the summary
-> line. Keep the message on a single line, never pass `--wait`, and retry the command once if
-> it fails.
+> Everything below that line is free-form detail. This file is the only channel back; nothing
+> you print in your own final response is read.
+
+The bee never runs a herdr command — the Stop hook does the waking, and the file carries the
+substance. Do not ask a bee to notify you itself; that is the instruction it forgets.
 
 Send it without waiting:
 
@@ -165,19 +196,22 @@ with `herdr agent send-keys <name> enter`.
 Once every startable role is dispatched, **stop**. Do not run `herdr agent wait`, do not loop
 on `herdr agent list`, and do not schedule a timer. Tell the user which bees are flying, which
 roles are queued, which bees are waiting on a dialog only they can answer, and that each bee
-will wake you when it reports. A bee's `herdr agent prompt` lands in your pane as a new turn —
-that is the only thing you wait on.
+will wake you when its turn ends. That hook's `herdr agent prompt` lands in your pane as a new
+turn — it is the only thing you wait on.
 
 ### Handle a report
 
-A turn that starts with `[swarm:<name>] ...` is a bee's report. Handle it in one pass:
+A turn that starts with `[swarm:<name>] turn ended` is the bee's Stop hook firing. Handle it in
+one pass:
 
-1. Read the bee's Markdown report from its report path.
+1. Read the bee's Markdown report from the path in the message and take its `STATUS:` line.
 2. `DONE` — record the outcome in the manifest and free the slot.
    `FAILED` — record why; decide whether to re-dispatch the role, hand it to another bee, or
    surface it to the user.
    `BLOCKED` — answer the question with `herdr agent prompt <name> "<answer>"` and keep the
-   slot occupied; the bee reports again when it settles.
+   slot occupied; the hook fires again when that turn ends.
+   No report file, or one with no `STATUS:` line — the bee ended a turn without finishing its
+   contract. Read its screen, and either re-prompt it for the report or surface it.
 3. If a slot is free and roles are queued, start the next one now.
 4. Take one cheap sweep of `herdr agent list` while you are awake. It is the only way to
    notice a bee frozen on a dialog, which by definition cannot report. For any bee that is
@@ -187,11 +221,10 @@ A turn that starts with `[swarm:<name>] ...` is a bee's report. Handle it in one
    since unblocked shows up ready on this sweep; dispatch its role then.
 5. Report the increment to the user, then stop again.
 
-If a bee's report path is missing or empty, fall back to
+Reading a bee's screen is a fallback, not a source of truth:
 `herdr agent read <name> --source recent-unwrapped --lines 120`. If raising `--lines` reveals
 no more of a completed response, the agent is on the terminal's alternate screen and those
-rows are unrecoverable — ask the bee to write the report file again and reply with just the
-path.
+rows are unrecoverable — re-prompt the bee to write the report file instead.
 
 ### Wrap up
 
