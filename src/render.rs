@@ -1,5 +1,5 @@
 use crate::cli::Format;
-use crate::commands::{GetOutcome, InitOutcome, TrashedKey};
+use crate::commands::{GetOutcome, InitOutcome};
 use age::secrecy::ExposeSecret;
 use serde_json::json;
 
@@ -21,13 +21,6 @@ pub fn set(key: String, format: Format) -> String {
 pub fn unset(key: String, format: Format) -> String {
     match format {
         Format::Text => format!("Unset {key}\n"),
-        Format::Json => format!("{}\n", json!({ "key": key })),
-    }
-}
-
-pub fn restore(key: String, format: Format) -> String {
-    match format {
-        Format::Text => format!("Restored {key}\n"),
         Format::Json => format!("{}\n", json!({ "key": key })),
     }
 }
@@ -58,27 +51,5 @@ pub fn list(keys: Vec<String>, format: Format) -> String {
             }
         }
         Format::Json => format!("{}\n", json!({ "keys": keys })),
-    }
-}
-
-pub fn list_trash(entries: Vec<TrashedKey>, format: Format) -> String {
-    match format {
-        Format::Text => entries
-            .into_iter()
-            .map(|entry| {
-                format!(
-                    "{}\t{}\n",
-                    entry.key,
-                    crate::timestamp::format(entry.deleted_at)
-                )
-            })
-            .collect(),
-        Format::Json => {
-            let trashed: Vec<_> = entries
-                .into_iter()
-                .map(|entry| json!({ "key": entry.key, "deleted_at": crate::timestamp::format(entry.deleted_at) }))
-                .collect();
-            format!("{}\n", json!({ "trashed": trashed }))
-        }
     }
 }

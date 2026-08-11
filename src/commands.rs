@@ -1,16 +1,10 @@
 use crate::error::RsnugError;
-use crate::vault::{self, TrashEntry, VaultData};
+use crate::vault::{self, VaultData};
 use age::secrecy::{ExposeSecret, SecretString};
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct InitOutcome {
     pub path: std::path::PathBuf,
-}
-
-pub struct TrashedKey {
-    pub key: String,
-    pub deleted_at: u64,
 }
 
 pub enum GetOutcome {
@@ -44,13 +38,7 @@ pub fn set(
     value: SecretString,
 ) -> Result<(), RsnugError> {
     let mut data = vault::load(path, passphrase)?;
-    let value = value.expose_secret().to_owned();
-    if let Some(previous) = data.remove(&key)
-        && previous != value
-    {
-        data.trash_push(key.clone(), TrashEntry::new(previous, now()));
-    }
-    data.insert(key, value);
+    data.insert(key, value.expose_secret().to_owned());
     vault::save(path, &data, passphrase)
 }
 
@@ -79,58 +67,13 @@ pub fn get(
 
 pub fn unset(path: &Path, passphrase: &SecretString, key: &str) -> Result<(), RsnugError> {
     let mut data = vault::load(path, passphrase)?;
-    let value = data
-        .remove(key)
-        .ok_or_else(|| RsnugError::KeyNotFound(key.to_owned()))?;
-    data.trash_push(key.to_owned(), TrashEntry::new(value, now()));
-    vault::save(path, &data, passphrase)
-}
-
-pub fn restore(
-    path: &Path,
-    passphrase: &SecretString,
-    key: &str,
-    at: Option<u64>,
-) -> Result<(), RsnugError> {
-    let mut data = vault::load(path, passphrase)?;
-    let entry = match at {
-        Some(at) => {
-            data.trash_take_at(key, at)
-                .ok_or_else(|| RsnugError::TrashGenerationNotFound {
-                    key: key.to_owned(),
-                    at,
-                })?
-        }
-        None => data
-            .trash_pop(key)
-            .ok_or_else(|| RsnugError::KeyNotFound(key.to_owned()))?,
-    };
-    if data.get(key).is_some() {
-        return Err(RsnugError::KeyAlreadyExists(key.to_owned()));
+    if data.remove(key).is_none() {
+        return Err(RsnugError::KeyNotFound(key.to_owned()));
     }
-    data.insert(key.to_owned(), entry.into_value());
     vault::save(path, &data, passphrase)
 }
 
 pub fn list(path: &Path, passphrase: &SecretString) -> Result<Vec<String>, RsnugError> {
     let data = vault::load(path, passphrase)?;
     Ok(data.keys().map(str::to_owned).collect())
-}
-
-pub fn list_trash(path: &Path, passphrase: &SecretString) -> Result<Vec<TrashedKey>, RsnugError> {
-    let data = vault::load(path, passphrase)?;
-    Ok(data
-        .trash_entries()
-        .map(|(key, entry)| TrashedKey {
-            key: key.to_owned(),
-            deleted_at: entry.deleted_at(),
-        })
-        .collect())
-}
-
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
-        .unwrap_or_default()
 }

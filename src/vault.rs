@@ -5,43 +5,19 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-const LEGACY_VERSION: u32 = 1;
-const CURRENT_VERSION: u32 = 2;
+const CURRENT_VERSION: u32 = 1;
 
 #[derive(Serialize, Deserialize)]
 pub struct VaultData {
     version: u32,
     entries: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    trash: BTreeMap<String, Vec<TrashEntry>>,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct TrashEntry {
-    value: String,
-    deleted_at: u64,
-}
-
-impl TrashEntry {
-    pub fn new(value: String, deleted_at: u64) -> Self {
-        Self { value, deleted_at }
-    }
-
-    pub fn deleted_at(&self) -> u64 {
-        self.deleted_at
-    }
-
-    pub fn into_value(self) -> String {
-        self.value
-    }
 }
 
 impl VaultData {
     pub fn empty() -> Self {
         Self {
-            version: LEGACY_VERSION,
+            version: CURRENT_VERSION,
             entries: BTreeMap::new(),
-            trash: BTreeMap::new(),
         }
     }
 
@@ -59,49 +35,6 @@ impl VaultData {
 
     pub fn keys(&self) -> impl Iterator<Item = &str> {
         self.entries.keys().map(String::as_str)
-    }
-
-    pub fn trash_push(&mut self, key: String, entry: TrashEntry) {
-        self.trash.entry(key).or_default().push(entry);
-        self.sync_version();
-    }
-
-    pub fn trash_pop(&mut self, key: &str) -> Option<TrashEntry> {
-        let generations = self.trash.get_mut(key)?;
-        let entry = generations.pop();
-        self.prune(key);
-        entry
-    }
-
-    pub fn trash_take_at(&mut self, key: &str, deleted_at: u64) -> Option<TrashEntry> {
-        let generations = self.trash.get_mut(key)?;
-        let index = generations
-            .iter()
-            .rposition(|entry| entry.deleted_at == deleted_at)?;
-        let entry = generations.remove(index);
-        self.prune(key);
-        Some(entry)
-    }
-
-    fn prune(&mut self, key: &str) {
-        if self.trash.get(key).is_some_and(Vec::is_empty) {
-            self.trash.remove(key);
-        }
-        self.sync_version();
-    }
-
-    pub fn trash_entries(&self) -> impl Iterator<Item = (&str, &TrashEntry)> {
-        self.trash.iter().flat_map(|(key, generations)| {
-            generations.iter().map(move |entry| (key.as_str(), entry))
-        })
-    }
-
-    fn sync_version(&mut self) {
-        self.version = if self.trash.is_empty() {
-            LEGACY_VERSION
-        } else {
-            CURRENT_VERSION
-        };
     }
 }
 
@@ -137,15 +70,14 @@ pub fn load(path: &Path, passphrase: &SecretString) -> Result<VaultData, RsnugEr
     };
 
     let plaintext = decrypt(&ciphertext, passphrase)?;
-    let mut data: VaultData = serde_json::from_slice(&plaintext)?;
+    let data: VaultData = serde_json::from_slice(&plaintext)?;
 
-    if data.version == 0 || data.version > CURRENT_VERSION {
+    if data.version != CURRENT_VERSION {
         return Err(RsnugError::UnsupportedVaultVersion {
             found: data.version,
             expected: CURRENT_VERSION,
         });
     }
-    data.sync_version();
 
     Ok(data)
 }
@@ -234,7 +166,7 @@ mod tests {
     }
 
     #[test]
-    fn a_v1_vault_loads_with_an_empty_trash() {
+    fn a_v1_vault_loads() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("vault.age");
         let v1 = br#"{"version":1,"entries":{"KEY":"VALUE"}}"#;
@@ -243,7 +175,6 @@ mod tests {
         let data = load(&path, &passphrase("pw")).expect("load");
 
         assert_eq!(data.get("KEY"), Some("VALUE"));
-        assert_eq!(data.trash_entries().count(), 0);
     }
 
     #[test]
@@ -278,98 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn trash_round_trips_through_save_and_load() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("vault.age");
-        let mut data = VaultData::empty();
-        data.insert("KEY".to_owned(), "VALUE".to_owned());
-        let value = data.remove("KEY").expect("entry was present");
-        data.trash_push("KEY".to_owned(), TrashEntry::new(value, 1_700_000_000));
-        save(&path, &data, &passphrase("pw")).expect("save");
-
-        let loaded = load(&path, &passphrase("pw")).expect("load");
-
-        assert_eq!(loaded.get("KEY"), None);
-        let (key, entry) = loaded.trash_entries().next().expect("one trashed entry");
-        assert_eq!(key, "KEY");
-        assert_eq!(entry.deleted_at(), 1_700_000_000);
-    }
-
-    #[test]
-    fn trashing_the_same_key_twice_keeps_both_generations() {
-        let mut data = VaultData::empty();
-        data.trash_push("KEY".to_owned(), TrashEntry::new("OLD".to_owned(), 1));
-        data.trash_push("KEY".to_owned(), TrashEntry::new("NEW".to_owned(), 2));
-
-        assert_eq!(data.trash_entries().count(), 2);
-        assert_eq!(data.trash_pop("KEY").expect("newest").into_value(), "NEW");
-        assert_eq!(data.trash_pop("KEY").expect("oldest").into_value(), "OLD");
-        assert!(data.trash_pop("KEY").is_none());
-    }
-
-    #[test]
-    fn trash_take_at_returns_the_generation_with_that_timestamp() {
-        let mut data = VaultData::empty();
-        data.trash_push("KEY".to_owned(), TrashEntry::new("OLD".to_owned(), 1));
-        data.trash_push("KEY".to_owned(), TrashEntry::new("NEW".to_owned(), 2));
-
-        assert_eq!(
-            data.trash_take_at("KEY", 1).expect("older").into_value(),
-            "OLD"
-        );
-        assert_eq!(data.trash_entries().count(), 1);
-        assert_eq!(data.trash_pop("KEY").expect("newer").into_value(), "NEW");
-    }
-
-    #[test]
-    fn trash_take_at_returns_none_for_an_unknown_timestamp() {
-        let mut data = VaultData::empty();
-        data.trash_push("KEY".to_owned(), TrashEntry::new("VALUE".to_owned(), 1));
-
-        assert!(data.trash_take_at("KEY", 99).is_none());
-        assert_eq!(data.trash_entries().count(), 1);
-    }
-
-    #[test]
-    fn trash_take_at_returns_none_for_an_unknown_key() {
-        let mut data = VaultData::empty();
-        data.trash_push("KEY".to_owned(), TrashEntry::new("VALUE".to_owned(), 1));
-
-        assert!(data.trash_take_at("NOPE", 1).is_none());
-        assert_eq!(data.trash_entries().count(), 1);
-    }
-
-    #[test]
-    fn trash_take_at_prefers_the_newest_generation_when_timestamps_tie() {
-        let mut data = VaultData::empty();
-        data.trash_push("KEY".to_owned(), TrashEntry::new("A".to_owned(), 5));
-        data.trash_push("KEY".to_owned(), TrashEntry::new("B".to_owned(), 5));
-
-        assert_eq!(
-            data.trash_take_at("KEY", 5).expect("newest").into_value(),
-            "B"
-        );
-        assert_eq!(
-            data.trash_take_at("KEY", 5).expect("oldest").into_value(),
-            "A"
-        );
-        assert!(data.trash_take_at("KEY", 5).is_none());
-    }
-
-    #[test]
-    fn trash_take_at_drops_back_to_v1_when_it_empties_the_trash() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("vault.age");
-        let mut data = VaultData::empty();
-        data.trash_push("KEY".to_owned(), TrashEntry::new("VALUE".to_owned(), 1));
-        data.trash_take_at("KEY", 1).expect("entry");
-        save(&path, &data, &passphrase("pw")).expect("save");
-
-        assert_eq!(on_disk_version(&path), 1);
-    }
-
-    #[test]
-    fn a_vault_without_trash_is_written_as_v1() {
+    fn a_saved_vault_is_written_as_v1() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("vault.age");
         let mut data = VaultData::empty();
@@ -380,26 +220,19 @@ mod tests {
     }
 
     #[test]
-    fn a_vault_with_trash_is_written_as_v2() {
+    fn a_removed_entry_leaves_no_trace_in_the_saved_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("vault.age");
         let mut data = VaultData::empty();
-        data.trash_push("KEY".to_owned(), TrashEntry::new("VALUE".to_owned(), 1));
+        data.insert("KEY".to_owned(), "SUPERSECRET".to_owned());
+        save(&path, &data, &passphrase("pw")).expect("save");
+        data.remove("KEY").expect("entry was present");
         save(&path, &data, &passphrase("pw")).expect("save");
 
-        assert_eq!(on_disk_version(&path), 2);
-    }
+        let ciphertext = std::fs::read(&path).expect("read");
+        let plaintext = decrypt(&ciphertext, &passphrase("pw")).expect("decrypt");
 
-    #[test]
-    fn emptying_the_trash_makes_the_vault_v1_again() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("vault.age");
-        let mut data = VaultData::empty();
-        data.trash_push("KEY".to_owned(), TrashEntry::new("VALUE".to_owned(), 1));
-        data.trash_pop("KEY").expect("entry");
-        save(&path, &data, &passphrase("pw")).expect("save");
-
-        assert_eq!(on_disk_version(&path), 1);
+        assert!(!String::from_utf8_lossy(&plaintext).contains("SUPERSECRET"));
     }
 
     fn on_disk_version(path: &Path) -> u64 {
@@ -417,15 +250,6 @@ mod tests {
         assert_eq!(data.remove("KEY").as_deref(), Some("VALUE"));
         assert_eq!(data.get("KEY"), None);
         assert_eq!(data.remove("KEY"), None);
-    }
-
-    #[test]
-    fn trash_pop_returns_the_stored_value_once() {
-        let mut data = VaultData::empty();
-        data.trash_push("KEY".to_owned(), TrashEntry::new("VALUE".to_owned(), 1));
-
-        assert_eq!(data.trash_pop("KEY").expect("entry").into_value(), "VALUE");
-        assert!(data.trash_pop("KEY").is_none());
     }
 
     #[test]

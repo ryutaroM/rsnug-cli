@@ -10,8 +10,6 @@ pub enum RsnugError {
     VaultNotOverwritable(PathBuf),
     DecryptionFailed,
     KeyNotFound(String),
-    TrashGenerationNotFound { key: String, at: u64 },
-    KeyAlreadyExists(String),
     UnsupportedVaultVersion { found: u32, expected: u32 },
     HomeDirectoryUnavailable,
     Io(std::io::Error),
@@ -26,13 +24,11 @@ impl RsnugError {
             RsnugError::VaultNotOverwritable(_) => exit::VAULT_UNAVAILABLE,
             RsnugError::DecryptionFailed => exit::VAULT_UNAVAILABLE,
             RsnugError::VaultAlreadyExists(_) => exit::GENERAL_ERROR,
-            RsnugError::KeyAlreadyExists(_) => exit::GENERAL_ERROR,
             RsnugError::UnsupportedVaultVersion { .. } => exit::GENERAL_ERROR,
             RsnugError::HomeDirectoryUnavailable => exit::GENERAL_ERROR,
             RsnugError::Io(_) => exit::GENERAL_ERROR,
             RsnugError::Serialization(_) => exit::GENERAL_ERROR,
             RsnugError::KeyNotFound(_) => exit::KEY_NOT_FOUND,
-            RsnugError::TrashGenerationNotFound { .. } => exit::KEY_NOT_FOUND,
         }
     }
 }
@@ -67,19 +63,6 @@ impl fmt::Display for RsnugError {
                 )
             }
             RsnugError::KeyNotFound(key) => write!(f, "key `{key}` not found"),
-            RsnugError::TrashGenerationNotFound { key, at } => {
-                write!(
-                    f,
-                    "no trashed generation of `{key}` at {}",
-                    crate::timestamp::format(*at)
-                )
-            }
-            RsnugError::KeyAlreadyExists(key) => {
-                write!(
-                    f,
-                    "key `{key}` is live; restoring it would overwrite the current value"
-                )
-            }
             RsnugError::UnsupportedVaultVersion { found, expected } => {
                 write!(f, "unsupported vault version {found} (expected {expected})")
             }
