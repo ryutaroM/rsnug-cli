@@ -68,8 +68,8 @@ limit. Queue the remaining roles and release one only when a bee's report frees 
 
 ### Open a run directory
 
-Bees hand back results as files, so create a run directory outside every worktree and keep the
-absolute paths:
+Bees hand back results as files, and their hook settings live here too, so create a run
+directory outside every worktree and keep the absolute paths:
 
 ```bash
 mktemp -d -t herdr-swarm
@@ -104,8 +104,9 @@ the branch on `main` unless the user asks for another base:
 git worktree add -b swarm/<name> <repo_root>/.claude/worktrees/<name> main
 ```
 
-Now arm the bee's report hook, **before** the agent exists — settings are read at launch, so a
-file written afterwards is not picked up. Write `<worktree>/.claude/settings.local.json`:
+Now arm the bee's report hook. Keep it out of the worktree entirely — `.claude/settings.json`
+is the project's and `.claude/settings.local.json` is the user's personal file; neither is
+yours to write. Put it in your own run directory as `<run-dir>/<name>.settings.json`:
 
 ```json
 {
@@ -126,9 +127,8 @@ file written afterwards is not picked up. Write `<worktree>/.claude/settings.loc
 ```
 
 This is what actually wakes you. A bee asked to run a command at the end of its turn may
-simply not do it — the hook fires whether or not the bee remembers. `.claude/settings.local.json`
-is already ignored by git in this repo, so it never reaches the branch; confirm that before
-writing it, and if it is not ignored, tell the bee not to commit it.
+simply not do it — the hook fires whether or not the bee remembers. Nothing but the checkout
+itself ever lands in the bee's worktree, and the file dies with the run directory.
 
 Then give the bee a tab **in the queen's own workspace**, so the whole swarm stays in one
 place:
@@ -139,12 +139,15 @@ herdr tab create --workspace <queen_workspace_id> --cwd <repo_root>/.claude/work
 ```
 
 Take the pane from `.result.root_pane.pane_id`, label the pane itself (`--label` only names the
-tab), and start the agent with a startup timeout large enough for a first launch. Pass no
-native agent arguments — the bee runs with its default permission behavior:
+tab), and start the agent with a startup timeout large enough for a first launch. Everything
+after `--` is passed to the agent; `--settings` layers your hook file on top of the settings
+the bee would load anyway, so the user's own configuration still applies. Pass nothing else —
+in particular nothing that changes permission behavior:
 
 ```bash
 herdr pane rename <pane_id> <name>
-herdr agent start <name> --kind claude --pane <pane_id> --timeout 60000
+herdr agent start <name> --kind claude --pane <pane_id> --timeout 60000 \
+  -- --settings <run-dir>/<name>.settings.json
 ```
 
 A bee asks whether it trusts the files in a directory the first time it starts in a new
