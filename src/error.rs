@@ -45,7 +45,7 @@ impl fmt::Display for RsnugError {
             RsnugError::VaultAlreadyExists(path) => {
                 write!(
                     f,
-                    "vault already exists at {} (use --force)",
+                    "vault already exists at {} (use --force, which requires RSNUG_PASSPHRASE to open it)",
                     path.display()
                 )
             }

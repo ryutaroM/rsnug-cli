@@ -78,7 +78,8 @@ fn run_ok(args: &[&str], vault: &Path, passphrase: &str) -> String {
 fn assert_lists_commands(text: &str) {
     for command in ["init", "set", "get", "list", "unset"] {
         assert!(
-            text.contains(command),
+            text.lines()
+                .any(|line| line.trim_start().starts_with(command)),
             "help should list `{command}`: {text}"
         );
     }
@@ -292,6 +293,24 @@ fn init_with_force_on_an_undecryptable_vault_says_to_delete_the_file() {
     assert_eq!(stdout(&output), "");
     assert!(stderr(&output).contains("delete"), "{}", stderr(&output));
     assert_eq!(std::fs::read(&vault).expect("read"), b"not an age file");
+}
+
+#[test]
+fn init_with_force_on_an_unreadable_vault_does_not_blame_the_passphrase() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("vault.age");
+    std::fs::create_dir(&vault).expect("create dir");
+
+    let output = run_with_vault(&["init", "--force"], &vault, Some("pw"));
+
+    assert_eq!(code(&output), 1);
+    assert_eq!(stdout(&output), "");
+    assert!(
+        !stderr(&output).contains("RSNUG_PASSPHRASE"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(vault.is_dir());
 }
 
 #[test]

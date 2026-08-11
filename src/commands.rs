@@ -21,7 +21,7 @@ pub fn init(
         if !force {
             return Err(RsnugError::VaultAlreadyExists(path.to_path_buf()));
         }
-        if !vault::is_decryptable(path, passphrase) {
+        if !vault::is_decryptable(path, passphrase)? {
             return Err(RsnugError::VaultNotOverwritable(path.to_path_buf()));
         }
     }

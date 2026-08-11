@@ -82,10 +82,9 @@ pub fn load(path: &Path, passphrase: &SecretString) -> Result<VaultData, RsnugEr
     Ok(data)
 }
 
-pub fn is_decryptable(path: &Path, passphrase: &SecretString) -> bool {
-    std::fs::read(path)
-        .ok()
-        .is_some_and(|ciphertext| decrypt(&ciphertext, passphrase).is_ok())
+pub fn is_decryptable(path: &Path, passphrase: &SecretString) -> Result<bool, RsnugError> {
+    let ciphertext = std::fs::read(path)?;
+    Ok(decrypt(&ciphertext, passphrase).is_ok())
 }
 
 pub fn save(path: &Path, data: &VaultData, passphrase: &SecretString) -> Result<(), RsnugError> {
@@ -183,19 +182,28 @@ mod tests {
         let path = dir.path().join("vault.age");
         save(&path, &VaultData::empty(), &passphrase("pw")).expect("save");
 
-        assert!(is_decryptable(&path, &passphrase("pw")));
-        assert!(!is_decryptable(&path, &passphrase("other")));
+        assert_eq!(is_decryptable(&path, &passphrase("pw")).ok(), Some(true));
+        assert_eq!(
+            is_decryptable(&path, &passphrase("other")).ok(),
+            Some(false)
+        );
     }
 
     #[test]
-    fn is_decryptable_rejects_garbage_and_missing_files() {
+    fn is_decryptable_rejects_garbage() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("vault.age");
-
-        assert!(!is_decryptable(&path, &passphrase("pw")));
-
         std::fs::write(&path, b"not an age file").expect("write");
-        assert!(!is_decryptable(&path, &passphrase("pw")));
+
+        assert_eq!(is_decryptable(&path, &passphrase("pw")).ok(), Some(false));
+    }
+
+    #[test]
+    fn is_decryptable_reports_an_unreadable_file_as_an_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        assert!(is_decryptable(&dir.path().join("missing.age"), &passphrase("pw")).is_err());
+        assert!(is_decryptable(dir.path(), &passphrase("pw")).is_err());
     }
 
     #[test]

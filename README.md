@@ -84,7 +84,9 @@ All diagnostic messages and errors go to stderr. stdout carries only the command
 
 ### Deletion is permanent
 
-`unset <KEY>` deletes the entry. There is no undo and no command that brings it back. The vault file is rewritten without it, so the value leaves the file too — `unset` is a way to shred a compromised secret, not just to hide it.
+`unset <KEY>` deletes the entry. There is no undo and no command that brings it back. rsnug writes a new vault file without the entry and renames it over the old one, so the value is gone from the vault rsnug reads from here on.
+
+It is not a shredder. The replaced file's blocks are unlinked rather than overwritten, so the old ciphertext can survive in free space, in backups, and in filesystem snapshots — and it opens with the same passphrase. To retire a compromised secret, rotate it at the source; `unset` only stops rsnug from handing it out.
 
 `set` on a key that already exists replaces the value outright, with the same finality.
 
