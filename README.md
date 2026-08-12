@@ -30,10 +30,11 @@ Then reload the shell (`source ~/.zshrc`, or open a new terminal) before running
 rsnug [OPTIONS] <COMMAND>
 
 Commands:
-  init  Create a new vault
-  set   Set a secret
-  get   Get metadata for a secret
-  list  List the registered keys
+  init   Create a new vault
+  set    Set a secret
+  get    Get metadata for a secret
+  unset  Delete a secret
+  list   List the registered keys
 
 Options:
   -f, --vault <PATH>     Path to the vault file
@@ -47,6 +48,7 @@ rsnug init [--force]
 rsnug set <KEY> <VALUE>
 rsnug set <KEY> --stdin
 rsnug get <KEY> [--reveal]
+rsnug unset <KEY>
 rsnug list
 ```
 
@@ -78,7 +80,29 @@ All diagnostic messages and errors go to stderr. stdout carries only the command
 | 1 | general error (I/O failure, `init` without `--force` on an existing vault, etc.) |
 | 2 | usage error (missing/conflicting arguments, unknown command) |
 | 3 | key does not exist |
-| 4 | vault is uninitialized, or authentication failed |
+| 4 | vault is uninitialized, authentication failed, or `init --force` was pointed at a vault the passphrase does not open |
+
+### Deletion is permanent
+
+`unset <KEY>` deletes the entry. There is no undo and no command that brings it back. rsnug writes a new vault file without the entry and renames it over the old one, so the value is gone from the vault rsnug reads from here on.
+
+It is not a shredder. The replaced file's blocks are unlinked rather than overwritten, so the old ciphertext can survive in free space, in backups, and in filesystem snapshots — and it opens with the same passphrase. To retire a compromised secret, rotate it at the source; `unset` only stops rsnug from handing it out.
+
+`set` on a key that already exists replaces the value outright, with the same finality.
+
+Since the tool never prompts, an agent holding the passphrase can enumerate every key with `list` and destroy the vault's contents in a loop. Guard the passphrase accordingly, and keep a backup of the vault file if the secrets in it are not reproducible.
+
+`unset` on a key that does not exist changes nothing and exits 3. It is not idempotent by design: a caller that expected the key to be there finds out.
+
+### `init --force` verifies ownership
+
+`init --force` replaces an existing vault with an empty one, so it checks first that `RSNUG_PASSPHRASE` actually decrypts the file. If it does not, the command refuses and exits 4 without touching a byte. Knowing the path to a vault is not enough to erase it — you have to be able to open it.
+
+If the file is genuinely corrupt and no passphrase opens it, rsnug will not recreate it for you; delete the file yourself and run `init` again.
+
+### Vault format
+
+The vault records a format version, currently 1. A vault carrying any other version is rejected rather than read on a guess.
 
 ### `get` hides the value by default
 

@@ -29,6 +29,10 @@ impl VaultData {
         self.entries.insert(key, value);
     }
 
+    pub fn remove(&mut self, key: &str) -> Option<String> {
+        self.entries.remove(key)
+    }
+
     pub fn keys(&self) -> impl Iterator<Item = &str> {
         self.entries.keys().map(String::as_str)
     }
@@ -76,6 +80,11 @@ pub fn load(path: &Path, passphrase: &SecretString) -> Result<VaultData, RsnugEr
     }
 
     Ok(data)
+}
+
+pub fn is_decryptable(path: &Path, passphrase: &SecretString) -> Result<bool, RsnugError> {
+    let ciphertext = std::fs::read(path)?;
+    Ok(decrypt(&ciphertext, passphrase).is_ok())
 }
 
 pub fn save(path: &Path, data: &VaultData, passphrase: &SecretString) -> Result<(), RsnugError> {
@@ -153,6 +162,102 @@ mod tests {
         let ciphertext = encrypt(b"hello vault", &passphrase("correct")).expect("encrypt");
         let result = decrypt(&ciphertext, &passphrase("wrong"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn a_v1_vault_loads() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.age");
+        let v1 = br#"{"version":1,"entries":{"KEY":"VALUE"}}"#;
+        std::fs::write(&path, encrypt(v1, &passphrase("pw")).expect("encrypt")).expect("write");
+
+        let data = load(&path, &passphrase("pw")).expect("load");
+
+        assert_eq!(data.get("KEY"), Some("VALUE"));
+    }
+
+    #[test]
+    fn is_decryptable_accepts_only_the_matching_passphrase() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.age");
+        save(&path, &VaultData::empty(), &passphrase("pw")).expect("save");
+
+        assert_eq!(is_decryptable(&path, &passphrase("pw")).ok(), Some(true));
+        assert_eq!(
+            is_decryptable(&path, &passphrase("other")).ok(),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn is_decryptable_rejects_garbage() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.age");
+        std::fs::write(&path, b"not an age file").expect("write");
+
+        assert_eq!(is_decryptable(&path, &passphrase("pw")).ok(), Some(false));
+    }
+
+    #[test]
+    fn is_decryptable_reports_an_unreadable_file_as_an_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        assert!(is_decryptable(&dir.path().join("missing.age"), &passphrase("pw")).is_err());
+        assert!(is_decryptable(dir.path(), &passphrase("pw")).is_err());
+    }
+
+    #[test]
+    fn a_future_vault_version_is_rejected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.age");
+        let future = br#"{"version":99,"entries":{}}"#;
+        std::fs::write(&path, encrypt(future, &passphrase("pw")).expect("encrypt")).expect("write");
+
+        assert!(load(&path, &passphrase("pw")).is_err());
+    }
+
+    #[test]
+    fn a_saved_vault_is_written_as_v1() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.age");
+        let mut data = VaultData::empty();
+        data.insert("KEY".to_owned(), "VALUE".to_owned());
+        save(&path, &data, &passphrase("pw")).expect("save");
+
+        assert_eq!(on_disk_version(&path), 1);
+    }
+
+    #[test]
+    fn a_removed_entry_leaves_no_trace_in_the_saved_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.age");
+        let mut data = VaultData::empty();
+        data.insert("KEY".to_owned(), "SUPERSECRET".to_owned());
+        save(&path, &data, &passphrase("pw")).expect("save");
+        data.remove("KEY").expect("entry was present");
+        save(&path, &data, &passphrase("pw")).expect("save");
+
+        let ciphertext = std::fs::read(&path).expect("read");
+        let plaintext = decrypt(&ciphertext, &passphrase("pw")).expect("decrypt");
+
+        assert!(!String::from_utf8_lossy(&plaintext).contains("SUPERSECRET"));
+    }
+
+    fn on_disk_version(path: &Path) -> u64 {
+        let ciphertext = std::fs::read(path).expect("read");
+        let plaintext = decrypt(&ciphertext, &passphrase("pw")).expect("decrypt");
+        let value: serde_json::Value = serde_json::from_slice(&plaintext).expect("json");
+        value["version"].as_u64().expect("version is a number")
+    }
+
+    #[test]
+    fn remove_takes_the_entry_out_of_entries() {
+        let mut data = VaultData::empty();
+        data.insert("KEY".to_owned(), "VALUE".to_owned());
+
+        assert_eq!(data.remove("KEY").as_deref(), Some("VALUE"));
+        assert_eq!(data.get("KEY"), None);
+        assert_eq!(data.remove("KEY"), None);
     }
 
     #[test]

@@ -17,8 +17,13 @@ pub fn init(
     passphrase: &SecretString,
     force: bool,
 ) -> Result<InitOutcome, RsnugError> {
-    if path.exists() && !force {
-        return Err(RsnugError::VaultAlreadyExists(path.to_path_buf()));
+    if path.exists() {
+        if !force {
+            return Err(RsnugError::VaultAlreadyExists(path.to_path_buf()));
+        }
+        if !vault::is_decryptable(path, passphrase)? {
+            return Err(RsnugError::VaultNotOverwritable(path.to_path_buf()));
+        }
     }
     vault::save(path, &VaultData::empty(), passphrase)?;
     Ok(InitOutcome {
@@ -58,6 +63,14 @@ pub fn get(
             key: key.to_owned(),
         }
     })
+}
+
+pub fn unset(path: &Path, passphrase: &SecretString, key: &str) -> Result<(), RsnugError> {
+    let mut data = vault::load(path, passphrase)?;
+    if data.remove(key).is_none() {
+        return Err(RsnugError::KeyNotFound(key.to_owned()));
+    }
+    vault::save(path, &data, passphrase)
 }
 
 pub fn list(path: &Path, passphrase: &SecretString) -> Result<Vec<String>, RsnugError> {
