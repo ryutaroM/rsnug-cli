@@ -2,6 +2,7 @@ mod cli;
 mod commands;
 mod error;
 mod exit;
+mod key;
 mod passphrase;
 mod render;
 mod vault;
