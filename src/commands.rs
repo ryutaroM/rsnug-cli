@@ -30,24 +30,17 @@ pub fn init(
         if !force {
             return Err(RsnugError::VaultAlreadyExists(path.to_path_buf()));
         }
-        let identities = match key::load(key_file) {
-            Ok(identities) => identities,
-            Err(RsnugError::KeyFileNotFound(_)) => {
-                return Err(RsnugError::VaultNotOverwritable(path.to_path_buf()));
-            }
-            Err(err) => return Err(err),
-        };
+        let identities = key::load(key_file)?;
         if !vault::is_decryptable(path, &identities)? {
             return Err(RsnugError::VaultNotOverwritable(path.to_path_buf()));
         }
         recipient_for(key_file, new_key, identities)?
     } else {
-        let identities = match key::load(key_file) {
-            Ok(identities) => identities,
-            Err(RsnugError::KeyFileNotFound(_)) => vec![key::generate(key_file)?],
+        match key::load(key_file) {
+            Ok(identities) => recipient_for(key_file, new_key, identities)?,
+            Err(RsnugError::KeyFileNotFound(_)) => key::generate(key_file)?.to_public(),
             Err(err) => return Err(err),
-        };
-        recipient_for(key_file, new_key, identities)?
+        }
     };
 
     vault::save(path, &VaultData::empty(), &recipient)?;
@@ -83,14 +76,16 @@ pub fn migrate(
     let data = vault::load_legacy(path, passphrase)?;
 
     let backup = backup_path(path);
+    if backup.exists() {
+        return Err(RsnugError::BackupAlreadyExists(backup));
+    }
     std::fs::copy(path, &backup)?;
 
-    let identities = match key::load(key_file) {
-        Ok(identities) => identities,
-        Err(RsnugError::KeyFileNotFound(_)) => vec![key::generate(key_file)?],
+    let recipient = match key::load(key_file) {
+        Ok(identities) => recipient_for(key_file, false, identities)?,
+        Err(RsnugError::KeyFileNotFound(_)) => key::generate(key_file)?.to_public(),
         Err(err) => return Err(err),
     };
-    let recipient = recipient_for(key_file, false, identities)?;
 
     vault::save(path, &data, &recipient)?;
 

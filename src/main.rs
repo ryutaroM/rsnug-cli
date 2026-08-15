@@ -2,6 +2,7 @@ mod cli;
 mod commands;
 mod error;
 mod exit;
+mod fsutil;
 mod key;
 mod render;
 mod vault;

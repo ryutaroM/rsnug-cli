@@ -1,4 +1,5 @@
 use crate::error::RsnugError;
+use crate::fsutil;
 use age::secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -88,7 +89,11 @@ pub fn is_decryptable(
     identities: &[age::x25519::Identity],
 ) -> Result<bool, RsnugError> {
     let ciphertext = read_vault(path)?;
-    Ok(decrypt(&ciphertext, identities, path).is_ok())
+    match decrypt(&ciphertext, identities, path) {
+        Ok(_) => Ok(true),
+        Err(RsnugError::LegacyVault(path)) => Err(RsnugError::LegacyVault(path)),
+        Err(_) => Ok(false),
+    }
 }
 
 fn read_vault(path: &Path) -> Result<Vec<u8>, RsnugError> {
@@ -122,29 +127,8 @@ pub fn save(
     let plaintext = serde_json::to_vec(data)?;
     let ciphertext = encrypt(&plaintext, recipient)?;
 
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-        set_private_permissions(parent, 0o700)?;
-    }
-
-    let temp_path = path.with_extension("age.tmp");
-    std::fs::write(&temp_path, &ciphertext)?;
-    set_private_permissions(&temp_path, 0o600)?;
-    std::fs::rename(&temp_path, path)?;
-
-    Ok(())
-}
-
-#[cfg(unix)]
-fn set_private_permissions(path: &Path, mode: u32) -> Result<(), RsnugError> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_private_permissions(_path: &Path, _mode: u32) -> Result<(), RsnugError> {
-    Ok(())
+    fsutil::prepare_parent(path)?;
+    fsutil::write_private_atomic(path, &ciphertext)
 }
 
 fn encrypt(plaintext: &[u8], recipient: &age::x25519::Recipient) -> Result<Vec<u8>, RsnugError> {

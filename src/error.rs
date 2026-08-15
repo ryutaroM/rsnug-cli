@@ -12,6 +12,7 @@ pub enum RsnugError {
     LegacyPassphraseMissing,
     ExcessiveWork { required: u8, max: u8 },
     VaultAlreadyMigrated(PathBuf),
+    BackupAlreadyExists(PathBuf),
     VaultNotFound(PathBuf),
     VaultAlreadyExists(PathBuf),
     VaultNotOverwritable(PathBuf),
@@ -37,6 +38,7 @@ impl RsnugError {
             RsnugError::DecryptionFailed => exit::VAULT_UNAVAILABLE,
             RsnugError::KeyFileAlreadyExists(_) => exit::GENERAL_ERROR,
             RsnugError::VaultAlreadyMigrated(_) => exit::GENERAL_ERROR,
+            RsnugError::BackupAlreadyExists(_) => exit::GENERAL_ERROR,
             RsnugError::VaultAlreadyExists(_) => exit::GENERAL_ERROR,
             RsnugError::UnsupportedVaultVersion { .. } => exit::GENERAL_ERROR,
             RsnugError::HomeDirectoryUnavailable => exit::GENERAL_ERROR,
@@ -97,6 +99,13 @@ impl fmt::Display for RsnugError {
             }
             RsnugError::VaultAlreadyMigrated(path) => {
                 write!(f, "vault at {} already uses a key file", path.display())
+            }
+            RsnugError::BackupAlreadyExists(path) => {
+                write!(
+                    f,
+                    "a backup already exists at {} (move it aside so migrate does not overwrite it)",
+                    path.display()
+                )
             }
             RsnugError::VaultNotFound(path) => {
                 write!(f, "vault not found at {}", path.display())

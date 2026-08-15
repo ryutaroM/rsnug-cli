@@ -1,4 +1,5 @@
 use crate::error::RsnugError;
+use crate::fsutil;
 use age::secrecy::ExposeSecret;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -43,7 +44,8 @@ pub fn load(path: &Path) -> Result<Vec<age::x25519::Identity>, RsnugError> {
 
     check_permissions(path, &metadata)?;
 
-    let contents = std::fs::read_to_string(path)?;
+    let contents = std::fs::read_to_string(path)
+        .map_err(|_| RsnugError::KeyFileInvalid(path.to_path_buf()))?;
     let identities = contents
         .lines()
         .map(str::trim)
@@ -60,20 +62,20 @@ pub fn load(path: &Path) -> Result<Vec<age::x25519::Identity>, RsnugError> {
 }
 
 pub fn generate(path: &Path) -> Result<age::x25519::Identity, RsnugError> {
-    if path.exists() {
-        return Err(RsnugError::KeyFileAlreadyExists(path.to_path_buf()));
-    }
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-        set_private_permissions(parent, 0o700)?;
-    }
+    fsutil::prepare_parent(path)?;
 
     let identity = age::x25519::Identity::generate();
-    let temp_path = temp_path(path);
-    std::fs::write(&temp_path, entry(&identity).as_bytes())?;
-    set_private_permissions(&temp_path, 0o600)?;
-    std::fs::rename(&temp_path, path)?;
+    let mut file = match fsutil::create_private(path) {
+        Ok(file) => file,
+        Err(RsnugError::Io(err)) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(RsnugError::KeyFileAlreadyExists(path.to_path_buf()));
+        }
+        Err(err) => return Err(err),
+    };
+
+    use std::io::Write;
+    file.write_all(entry(&identity).as_bytes())?;
+    file.sync_all()?;
 
     Ok(identity)
 }
@@ -92,10 +94,26 @@ pub fn append(path: &Path) -> Result<age::x25519::Identity, RsnugError> {
 
     let identity = age::x25519::Identity::generate();
     let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
+    if needs_leading_newline(&metadata, path)? {
+        file.write_all(b"\n")?;
+    }
     file.write_all(entry(&identity).as_bytes())?;
     file.sync_all()?;
 
     Ok(identity)
+}
+
+fn needs_leading_newline(metadata: &std::fs::Metadata, path: &Path) -> Result<bool, RsnugError> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    if metadata.len() == 0 {
+        return Ok(false);
+    }
+    let mut file = std::fs::File::open(path)?;
+    file.seek(SeekFrom::End(-1))?;
+    let mut last = [0u8; 1];
+    file.read_exact(&mut last)?;
+    Ok(last[0] != b'\n')
 }
 
 fn entry(identity: &age::x25519::Identity) -> String {
@@ -104,12 +122,6 @@ fn entry(identity: &age::x25519::Identity) -> String {
         identity.to_public(),
         identity.to_string().expose_secret()
     )
-}
-
-fn temp_path(path: &Path) -> PathBuf {
-    let mut name = path.as_os_str().to_owned();
-    name.push(".tmp");
-    PathBuf::from(name)
 }
 
 #[cfg(unix)]
@@ -127,18 +139,6 @@ fn check_permissions(path: &Path, metadata: &std::fs::Metadata) -> Result<(), Rs
 
 #[cfg(not(unix))]
 fn check_permissions(_path: &Path, _metadata: &std::fs::Metadata) -> Result<(), RsnugError> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn set_private_permissions(path: &Path, mode: u32) -> Result<(), RsnugError> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_private_permissions(_path: &Path, _mode: u32) -> Result<(), RsnugError> {
     Ok(())
 }
 
@@ -434,9 +434,75 @@ mod tests {
         assert!(matches!(result, Err(RsnugError::KeyFileNotFound(_))));
     }
 
+    #[test]
+    fn append_separates_from_a_file_with_no_trailing_newline() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("key");
+        let original = age::x25519::Identity::generate();
+        write_key_file(&path, original.to_string().expose_secret());
+
+        let added = append(&path).expect("append");
+        let loaded = load(&path).expect("load");
+
+        assert_eq!(
+            loaded.len(),
+            2,
+            "a key file without a final newline must not be corrupted"
+        );
+        assert_eq!(
+            loaded[0].to_public().to_string(),
+            original.to_public().to_string()
+        );
+        assert_eq!(
+            loaded[1].to_public().to_string(),
+            added.to_public().to_string()
+        );
+    }
+
+    #[test]
+    fn a_non_utf8_key_file_is_reported_as_invalid() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("key");
+        std::fs::write(&path, [0xff, 0xfe, 0x00, 0x01]).expect("write");
+        fsutil::set_private_permissions(&path, 0o600).expect("chmod");
+
+        let result = load(&path);
+
+        assert!(matches!(result, Err(RsnugError::KeyFileInvalid(reported)) if reported == path));
+    }
+
+    #[test]
+    fn generate_leaves_a_directory_it_did_not_create_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fsutil::set_private_permissions(dir.path(), 0o755).expect("chmod");
+
+        generate(&dir.path().join("key")).expect("generate");
+
+        assert_ne!(
+            mode_of(dir.path()),
+            0o700,
+            "--key-file must not lock down the directory the user pointed it into"
+        );
+    }
+
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777
+    }
+
+    #[cfg(not(unix))]
+    fn mode_of(_path: &Path) -> u32 {
+        0o755
+    }
+
     fn write_key_file(path: &Path, contents: &str) {
         std::fs::write(path, contents).expect("write");
-        set_private_permissions(path, 0o600).expect("chmod");
+        fsutil::set_private_permissions(path, 0o600).expect("chmod");
     }
 
     fn temp_env(vars: &[(&str, Option<&str>)], body: impl FnOnce()) {

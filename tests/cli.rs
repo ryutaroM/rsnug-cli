@@ -816,3 +816,96 @@ fn a_legacy_vault_without_a_key_file_still_points_at_migrate() {
         stderr(&output)
     );
 }
+
+#[test]
+fn init_force_with_a_mistyped_key_path_does_not_advise_deleting_the_vault() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("vault.age");
+    let key = dir.path().join("key");
+    init_vault(&vault, &key);
+
+    let output = run_with_vault(&["init", "--force"], &vault, &dir.path().join("typo"));
+
+    assert_eq!(code(&output), 4);
+    assert!(
+        !stderr(&output).contains("delete the file"),
+        "a wrong --key-file is not a reason to tell the user to destroy a good vault: {}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn init_force_on_a_legacy_vault_points_at_migrate_not_deletion() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("vault.age");
+    let key = dir.path().join("key");
+    write_key(&key);
+    legacy_vault(&vault, "pw", r#"{"KEY":"VALUE"}"#);
+    let original = std::fs::read(&vault).expect("read vault");
+
+    let output = run_with_vault(&["init", "--force"], &vault, &key);
+
+    assert_eq!(code(&output), 4);
+    assert!(
+        stderr(&output).contains("migrate"),
+        "migrate can rescue this vault, so deletion is the wrong advice: {}",
+        stderr(&output)
+    );
+    assert_eq!(std::fs::read(&vault).expect("read vault"), original);
+}
+
+#[test]
+fn init_new_key_on_a_fresh_machine_creates_exactly_one_identity() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("vault.age");
+    let key = dir.path().join("key");
+
+    assert_eq!(
+        code(&run_with_vault(&["init", "--new-key"], &vault, &key)),
+        0
+    );
+
+    let contents = std::fs::read_to_string(&key).expect("read key");
+    let secrets = contents
+        .lines()
+        .filter(|line| line.starts_with("AGE-SECRET-KEY-1"))
+        .count();
+    assert_eq!(
+        secrets, 1,
+        "the first identity would otherwise be dead weight"
+    );
+}
+
+#[test]
+fn migrate_refuses_to_clobber_an_existing_backup() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("vault.age");
+    let key = dir.path().join("key");
+    legacy_vault(&vault, "pw", r#"{"KEY":"VALUE"}"#);
+    let backup = dir.path().join("vault.age.bak");
+    std::fs::write(&backup, b"someone else's backup").expect("write backup");
+
+    let output = run_with_passphrase(&["migrate"], &vault, &key, "pw");
+
+    assert_ne!(code(&output), 0);
+    assert_eq!(
+        std::fs::read(&backup).expect("read backup"),
+        b"someone else's backup"
+    );
+}
+
+#[test]
+fn a_bare_relative_key_file_name_is_usable() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rsnug"));
+    command
+        .current_dir(dir.path())
+        .args(["--vault", "v.age", "--key-file", "mykey", "init"])
+        .stdin(Stdio::null())
+        .env_remove("RSNUG_PASSPHRASE")
+        .env_remove("RSNUG_KEY_FILE");
+    let output = command.output().expect("failed to run rsnug");
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert!(dir.path().join("mykey").exists());
+}
