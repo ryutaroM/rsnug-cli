@@ -41,7 +41,7 @@ fn run(cli: Cli) -> Result<String, RsnugError> {
         Command::Migrate => commands::migrate(&vault_path, &key_path, &legacy_passphrase()?)
             .map(|outcome| render::migrate(outcome, cli.format)),
         Command::Set { key, value, stdin } => {
-            let identities = key::load(&key_path)?;
+            let identities = identities_for(&vault_path, &key_path)?;
             let value = SecretString::from(if stdin {
                 read_stdin_value()?
             } else {
@@ -51,18 +51,34 @@ fn run(cli: Cli) -> Result<String, RsnugError> {
                 .map(|()| render::set(key, cli.format))
         }
         Command::Get { key, reveal } => {
-            let identities = key::load(&key_path)?;
+            let identities = identities_for(&vault_path, &key_path)?;
             commands::get(&vault_path, &identities, &key, reveal)
                 .map(|outcome| render::get(outcome, cli.format))
         }
         Command::Unset { key } => {
-            let identities = key::load(&key_path)?;
+            let identities = identities_for(&vault_path, &key_path)?;
             commands::unset(&vault_path, &identities, &key).map(|()| render::unset(key, cli.format))
         }
         Command::List => {
-            let identities = key::load(&key_path)?;
+            let identities = identities_for(&vault_path, &key_path)?;
             commands::list(&vault_path, &identities).map(|keys| render::list(keys, cli.format))
         }
+    }
+}
+
+fn identities_for(
+    vault_path: &std::path::Path,
+    key_path: &std::path::Path,
+) -> Result<Vec<age::x25519::Identity>, RsnugError> {
+    match key::load(key_path) {
+        Err(RsnugError::KeyFileNotFound(missing)) => {
+            if vault::is_legacy(vault_path).unwrap_or(false) {
+                Err(RsnugError::LegacyVault(vault_path.to_path_buf()))
+            } else {
+                Err(RsnugError::KeyFileNotFound(missing))
+            }
+        }
+        other => other,
     }
 }
 

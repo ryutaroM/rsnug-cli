@@ -799,3 +799,20 @@ fn a_group_readable_key_file_is_rejected() {
     assert_eq!(stdout(&output), "");
     assert!(stderr(&output).contains("600"), "{}", stderr(&output));
 }
+
+#[test]
+fn a_legacy_vault_without_a_key_file_still_points_at_migrate() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("vault.age");
+    let key = dir.path().join("key");
+    legacy_vault(&vault, "pw", r#"{"KEY":"VALUE"}"#);
+
+    let output = run_with_vault(&["list"], &vault, &key);
+
+    assert_eq!(code(&output), 4);
+    assert!(
+        stderr(&output).contains("migrate"),
+        "telling the user to run init here sends them the wrong way: {}",
+        stderr(&output)
+    );
+}
