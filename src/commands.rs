@@ -27,10 +27,16 @@ pub fn init(
     new_key: bool,
 ) -> Result<InitOutcome, RsnugError> {
     let recipient = if path.exists() {
-        let identities = key::load(key_file)?;
         if !force {
             return Err(RsnugError::VaultAlreadyExists(path.to_path_buf()));
         }
+        let identities = match key::load(key_file) {
+            Ok(identities) => identities,
+            Err(RsnugError::KeyFileNotFound(_)) => {
+                return Err(RsnugError::VaultNotOverwritable(path.to_path_buf()));
+            }
+            Err(err) => return Err(err),
+        };
         if !vault::is_decryptable(path, &identities)? {
             return Err(RsnugError::VaultNotOverwritable(path.to_path_buf()));
         }
