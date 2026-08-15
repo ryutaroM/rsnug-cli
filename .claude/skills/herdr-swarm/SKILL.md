@@ -2,18 +2,19 @@
 name: herdr-swarm
 description: "Lead a swarm of Claude Code bees via herdr: one worktree and one bee per role, dispatched from a single queen pane, with each bee reporting back to the queen when it finishes. Use when the user explicitly asks to use herdr for swarm/parallel delegation, or when there are multiple independent subtasks worth delegating. Do not use just because background work could help. Requires HERDR_ENV=1."
 argument-hint: "[tasks to delegate, optional]"
-allowed-tools: Bash(herdr agent list), Bash(herdr agent get *), Bash(herdr agent read *), Bash(herdr agent start *), Bash(herdr agent prompt *), Bash(herdr agent rename *), Bash(herdr worktree list *), Bash(git worktree add *), Bash(herdr tab create *), Bash(herdr agent send-keys *), Bash(herdr workspace list), Bash(herdr pane current *), Bash(herdr integration status), Bash(printenv HERDR_ENV), Read
+allowed-tools: Bash(herdr agent list), Bash(herdr agent get *), Bash(herdr agent read *), Bash(herdr agent start *), Bash(herdr agent prompt *), Bash(herdr agent rename *), Bash(herdr agent wait *), Bash(herdr worktree list *), Bash(git worktree add *), Bash(herdr tab create *), Bash(herdr agent send-keys *), Bash(herdr workspace list), Bash(herdr pane current *), Bash(herdr integration status), Bash(printenv HERDR_ENV), Read
 ---
 
 # herdr swarm
 
 You are the **queen**. Split the work into roles, give each role its own worktree and **bee**
-inside your own workspace, then stop. Bees prompt their results back to you; you never poll for
-them.
+inside your own workspace, then hand control back. Bees prompt their results to you; you arm one
+blocking wait rather than polling.
 
 Beyond building the bee's tab, do not build your own scaffolding around herdr's commands — no
-scratch directories, no report files, no hook settings, no manifest. herdr's own state
-(`agent list`, `workspace list`) is the record.
+scratch directories, no report files, no hook settings, no manifest. `herdr agent list` is the
+record: a bee's tab carries a `cwd` but no worktree identity, so `worktree list` and
+`workspace list` never show one.
 
 ## Preflight
 - HERDR_ENV: !`printenv HERDR_ENV`
@@ -129,16 +130,38 @@ On `agent_prompt_stalled`, read `--source visible` first. A dialog means the bee
 user; hand it over. Only if your prompt text sits unsubmitted with no dialog present, submit it
 with `herdr agent send-keys <name> enter`.
 
-## 5. Hand control back
+## 5. Hand control back, then arm one wait
 
-Once every startable role is dispatched, **stop**. No `herdr agent wait`, no polling loop, no
-timer. Tell the user which bees are flying, which roles are queued, and which are waiting on a
-dialog only they can answer. A bee's report arrives in your pane as a new turn — that is the
-only thing you wait on.
+A report is not guaranteed to arrive. It can be dropped in transit, or a bee can end its turn
+without running the command. If you stop with bees outstanding and nothing else armed, a lost
+report leaves nobody to wake you and the swarm deadlocks in silence.
+
+So once every startable role is dispatched, do both, in this order:
+
+1. **Tell the user first**, in text, before any further tool call: which bees are flying, which
+   roles are queued, which are waiting on a dialog only they can answer. Close with a line
+   telling them that a report can be lost, and that prompting you is the way to restart a swarm
+   that has gone quiet.
+2. **Arm exactly one blocking wait** on a single outstanding bee — no loop, no timer, no repeated
+   status reads:
+
+   ```bash
+   herdr agent wait <name> --timeout 900000
+   ```
+
+   `agent wait` takes one target, so pick any one outstanding bee; the sweep in step 6 covers the
+   rest. When it returns, go to step 6.
+
+If a bee reports before the wait returns, that report is a new turn — handle it in step 6 and
+let it re-arm the wait. If no bee is outstanding, do not arm anything; stop.
+
+On timeout, sweep as in step 6, report the increment, and re-arm **once**. If a second timeout
+passes with nothing changed, stop and hand it to the user — do not keep re-arming.
 
 ## 6. Handle a report
 
-A turn starting with `[swarm:<name>]` is a bee reporting. Handle it in one pass:
+You enter here two ways: a turn starting with `[swarm:<name>]`, which is a bee reporting, or the
+step 5 wait returning. Either way, handle it in one pass — with no report in hand, start at 3:
 
 1. Take the `STATUS:` line.
    `DONE` — record the outcome and free the slot.
@@ -148,9 +171,12 @@ A turn starting with `[swarm:<name>]` is a bee reporting. Handle it in one pass:
 3. Sweep `herdr agent list` once — the only way to catch a bee that never reported. For a bee
    that is `blocked` or `unknown`, read `--source visible` and hand it to the user with its
    name, screen, and pane ID; `unknown` is unresolved, never done. For a bee that is `idle` or
-   `done` with no report in hand, re-prompt it for the report — it ended its turn without
-   running the command. A bee the user has unblocked shows up ready here; dispatch its role then.
-4. Report the increment to the user, then stop again.
+   `done` with no report in hand, read `--source visible` first: the report may be on screen but
+   lost in transit, in which case take it from there. Otherwise re-prompt it for the report — it
+   ended its turn without running the command. A bee the user has unblocked shows up ready here;
+   dispatch its role then.
+4. Report the increment to the user in text, then re-arm the step 5 wait on one still-outstanding
+   bee. If none is outstanding, go to step 7.
 
 Screen reads are a fallback, not truth: `herdr agent read <name> --source recent-unwrapped
 --lines 120`. If raising `--lines` reveals nothing more, the output is on the alternate screen
