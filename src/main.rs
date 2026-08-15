@@ -3,6 +3,7 @@ mod commands;
 mod error;
 mod exit;
 mod key;
+#[allow(dead_code)]
 mod passphrase;
 mod render;
 mod vault;
@@ -12,6 +13,7 @@ use clap::Parser;
 use cli::{Cli, Command};
 use error::RsnugError;
 use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -32,10 +34,18 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<String, RsnugError> {
     let vault_path = vault::resolve_path(cli.vault)?;
-    let passphrase = passphrase::resolve()?;
+    let key_file = match std::env::var("RSNUG_KEY_FILE") {
+        Ok(value) if !value.is_empty() => PathBuf::from(value),
+        _ => {
+            return Err(RsnugError::KeyFileNotFound(PathBuf::from(
+                "$RSNUG_KEY_FILE",
+            )));
+        }
+    };
+    let identity = read_identity(&key_file)?;
 
     match cli.command {
-        Command::Init { force } => commands::init(&vault_path, &passphrase, force)
+        Command::Init { force } => commands::init(&vault_path, &identity, force)
             .map(|outcome| render::init(outcome, cli.format)),
         Command::Set { key, value, stdin } => {
             let value = SecretString::from(if stdin {
@@ -43,18 +53,26 @@ fn run(cli: Cli) -> Result<String, RsnugError> {
             } else {
                 value.expect("clap guarantees value xor stdin")
             });
-            commands::set(&vault_path, &passphrase, key.clone(), value)
+            commands::set(&vault_path, &identity, key.clone(), value)
                 .map(|()| render::set(key, cli.format))
         }
-        Command::Get { key, reveal } => commands::get(&vault_path, &passphrase, &key, reveal)
+        Command::Get { key, reveal } => commands::get(&vault_path, &identity, &key, reveal)
             .map(|outcome| render::get(outcome, cli.format)),
         Command::Unset { key } => {
-            commands::unset(&vault_path, &passphrase, &key).map(|()| render::unset(key, cli.format))
+            commands::unset(&vault_path, &identity, &key).map(|()| render::unset(key, cli.format))
         }
         Command::List => {
-            commands::list(&vault_path, &passphrase).map(|keys| render::list(keys, cli.format))
+            commands::list(&vault_path, &identity).map(|keys| render::list(keys, cli.format))
         }
     }
+}
+
+fn read_identity(path: &Path) -> Result<age::x25519::Identity, RsnugError> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|_| RsnugError::KeyFileNotFound(path.to_path_buf()))?;
+    text.trim()
+        .parse()
+        .map_err(|_| RsnugError::KeyFileInvalid(path.to_path_buf()))
 }
 
 fn read_stdin_value() -> Result<String, RsnugError> {

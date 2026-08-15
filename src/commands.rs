@@ -14,18 +14,18 @@ pub enum GetOutcome {
 
 pub fn init(
     path: &Path,
-    passphrase: &SecretString,
+    identity: &age::x25519::Identity,
     force: bool,
 ) -> Result<InitOutcome, RsnugError> {
     if path.exists() {
         if !force {
             return Err(RsnugError::VaultAlreadyExists(path.to_path_buf()));
         }
-        if !vault::is_decryptable(path, passphrase)? {
+        if !vault::is_decryptable(path, identity)? {
             return Err(RsnugError::VaultNotOverwritable(path.to_path_buf()));
         }
     }
-    vault::save(path, &VaultData::empty(), passphrase)?;
+    vault::save(path, &VaultData::empty(), &identity.to_public())?;
     Ok(InitOutcome {
         path: path.to_path_buf(),
     })
@@ -33,22 +33,22 @@ pub fn init(
 
 pub fn set(
     path: &Path,
-    passphrase: &SecretString,
+    identity: &age::x25519::Identity,
     key: String,
     value: SecretString,
 ) -> Result<(), RsnugError> {
-    let mut data = vault::load(path, passphrase)?;
+    let mut data = vault::load(path, identity)?;
     data.insert(key, value.expose_secret().to_owned());
-    vault::save(path, &data, passphrase)
+    vault::save(path, &data, &identity.to_public())
 }
 
 pub fn get(
     path: &Path,
-    passphrase: &SecretString,
+    identity: &age::x25519::Identity,
     key: &str,
     reveal: bool,
 ) -> Result<GetOutcome, RsnugError> {
-    let data = vault::load(path, passphrase)?;
+    let data = vault::load(path, identity)?;
     let value = data
         .get(key)
         .ok_or_else(|| RsnugError::KeyNotFound(key.to_owned()))?;
@@ -65,15 +65,15 @@ pub fn get(
     })
 }
 
-pub fn unset(path: &Path, passphrase: &SecretString, key: &str) -> Result<(), RsnugError> {
-    let mut data = vault::load(path, passphrase)?;
+pub fn unset(path: &Path, identity: &age::x25519::Identity, key: &str) -> Result<(), RsnugError> {
+    let mut data = vault::load(path, identity)?;
     if data.remove(key).is_none() {
         return Err(RsnugError::KeyNotFound(key.to_owned()));
     }
-    vault::save(path, &data, passphrase)
+    vault::save(path, &data, &identity.to_public())
 }
 
-pub fn list(path: &Path, passphrase: &SecretString) -> Result<Vec<String>, RsnugError> {
-    let data = vault::load(path, passphrase)?;
+pub fn list(path: &Path, identity: &age::x25519::Identity) -> Result<Vec<String>, RsnugError> {
+    let data = vault::load(path, identity)?;
     Ok(data.keys().map(str::to_owned).collect())
 }
