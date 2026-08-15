@@ -47,6 +47,9 @@ fn run(cli: Cli) -> Result<String, RsnugError> {
         }
         Command::Get { key, reveal } => commands::get(&vault_path, &passphrase, &key, reveal)
             .map(|outcome| render::get(outcome, cli.format)),
+        Command::Unset { key } => {
+            commands::unset(&vault_path, &passphrase, &key).map(|()| render::unset(key, cli.format))
+        }
         Command::List => {
             commands::list(&vault_path, &passphrase).map(|keys| render::list(keys, cli.format))
         }

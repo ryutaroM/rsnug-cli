@@ -69,10 +69,17 @@ fn code(output: &Output) -> i32 {
     output.status.code().expect("terminated by signal")
 }
 
+fn run_ok(args: &[&str], vault: &Path, passphrase: &str) -> String {
+    let output = run_with_vault(args, vault, Some(passphrase));
+    assert_eq!(code(&output), 0, "{args:?}: {}", stderr(&output));
+    stdout(&output)
+}
+
 fn assert_lists_commands(text: &str) {
-    for command in ["init", "set", "get", "list"] {
+    for command in ["init", "set", "get", "list", "unset"] {
         assert!(
-            text.contains(command),
+            text.lines()
+                .any(|line| line.trim_start().starts_with(command)),
             "help should list `{command}`: {text}"
         );
     }
@@ -222,6 +229,91 @@ fn init_with_force_overwrites() {
 }
 
 #[test]
+fn init_with_force_and_the_right_passphrase_empties_the_vault() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("vault.age");
+    init_vault(&vault, "pw");
+    assert_eq!(
+        code(&run_with_vault(
+            &["set", "KEY", "VALUE"],
+            &vault,
+            Some("pw")
+        )),
+        0
+    );
+
+    assert_eq!(
+        code(&run_with_vault(&["init", "--force"], &vault, Some("pw"))),
+        0
+    );
+
+    let output = run_with_vault(&["list"], &vault, Some("pw"));
+    assert_eq!(code(&output), 0);
+    assert_eq!(stdout(&output), "");
+}
+
+#[test]
+fn init_with_force_and_the_wrong_passphrase_keeps_the_vault_intact() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("vault.age");
+    init_vault(&vault, "pw-a");
+    assert_eq!(
+        code(&run_with_vault(
+            &["set", "KEY", "VALUE"],
+            &vault,
+            Some("pw-a")
+        )),
+        0
+    );
+
+    let output = run_with_vault(&["init", "--force"], &vault, Some("pw-b"));
+
+    assert_eq!(code(&output), 4);
+    assert_eq!(stdout(&output), "");
+    assert!(!stderr(&output).is_empty());
+    assert_eq!(
+        stdout(&run_with_vault(
+            &["get", "KEY", "--reveal"],
+            &vault,
+            Some("pw-a")
+        )),
+        "VALUE\n"
+    );
+}
+
+#[test]
+fn init_with_force_on_an_undecryptable_vault_says_to_delete_the_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("vault.age");
+    std::fs::write(&vault, b"not an age file").expect("write");
+
+    let output = run_with_vault(&["init", "--force"], &vault, Some("pw"));
+
+    assert_eq!(code(&output), 4);
+    assert_eq!(stdout(&output), "");
+    assert!(stderr(&output).contains("delete"), "{}", stderr(&output));
+    assert_eq!(std::fs::read(&vault).expect("read"), b"not an age file");
+}
+
+#[test]
+fn init_with_force_on_an_unreadable_vault_does_not_blame_the_passphrase() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("vault.age");
+    std::fs::create_dir(&vault).expect("create dir");
+
+    let output = run_with_vault(&["init", "--force"], &vault, Some("pw"));
+
+    assert_eq!(code(&output), 1);
+    assert_eq!(stdout(&output), "");
+    assert!(
+        !stderr(&output).contains("RSNUG_PASSPHRASE"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(vault.is_dir());
+}
+
+#[test]
 fn set_on_missing_vault_fails_with_vault_unavailable() {
     let dir = tempfile::tempdir().expect("tempdir");
     let vault = dir.path().join("vault.age");
@@ -327,6 +419,127 @@ fn get_missing_key_fails_with_key_not_found() {
     let output = run_with_vault(&["get", "NOPE"], &vault, Some("pw"));
 
     assert_eq!(code(&output), 3);
+    assert_eq!(stdout(&output), "");
+}
+
+#[test]
+fn unset_removes_the_key_from_list_and_get() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("vault.age");
+    init_vault(&vault, "pw");
+    assert_eq!(
+        code(&run_with_vault(
+            &["set", "KEY", "VALUE"],
+            &vault,
+            Some("pw")
+        )),
+        0
+    );
+
+    let output = run_with_vault(&["unset", "KEY"], &vault, Some("pw"));
+
+    assert_eq!(code(&output), 0);
+    assert_eq!(stdout(&output), "Unset KEY\n");
+    assert_eq!(stdout(&run_with_vault(&["list"], &vault, Some("pw"))), "");
+    assert_eq!(
+        code(&run_with_vault(&["get", "KEY"], &vault, Some("pw"))),
+        3
+    );
+}
+
+#[test]
+fn unset_leaves_other_keys_alone() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("vault.age");
+    init_vault(&vault, "pw");
+    for (key, value) in [("ONE", "1"), ("TWO", "2")] {
+        assert_eq!(
+            code(&run_with_vault(&["set", key, value], &vault, Some("pw"))),
+            0
+        );
+    }
+
+    assert_eq!(
+        code(&run_with_vault(&["unset", "ONE"], &vault, Some("pw"))),
+        0
+    );
+
+    let output = run_with_vault(&["list"], &vault, Some("pw"));
+    assert_eq!(stdout(&output), "TWO\n");
+}
+
+#[test]
+fn unset_twice_fails_the_second_time() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("vault.age");
+    init_vault(&vault, "pw");
+    run_ok(&["set", "KEY", "VALUE"], &vault, "pw");
+    run_ok(&["unset", "KEY"], &vault, "pw");
+
+    let output = run_with_vault(&["unset", "KEY"], &vault, Some("pw"));
+
+    assert_eq!(code(&output), 3);
+    assert_eq!(stdout(&output), "");
+}
+
+#[test]
+fn set_over_a_live_key_replaces_the_value() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("vault.age");
+    init_vault(&vault, "pw");
+    run_ok(&["set", "KEY", "OLD"], &vault, "pw");
+
+    run_ok(&["set", "KEY", "NEW"], &vault, "pw");
+
+    assert_eq!(run_ok(&["get", "KEY", "--reveal"], &vault, "pw"), "NEW\n");
+    assert_eq!(run_ok(&["list"], &vault, "pw"), "KEY\n");
+}
+
+#[test]
+fn restore_is_not_a_command() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("vault.age");
+    init_vault(&vault, "pw");
+
+    let output = run_with_vault(&["restore", "KEY"], &vault, Some("pw"));
+
+    assert_eq!(code(&output), 2);
+    assert_eq!(stdout(&output), "");
+}
+
+#[test]
+fn list_rejects_a_trash_flag() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("vault.age");
+    init_vault(&vault, "pw");
+
+    let output = run_with_vault(&["list", "--trash"], &vault, Some("pw"));
+
+    assert_eq!(code(&output), 2);
+    assert_eq!(stdout(&output), "");
+}
+
+#[test]
+fn unset_missing_key_fails_with_key_not_found() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("vault.age");
+    init_vault(&vault, "pw");
+
+    let output = run_with_vault(&["unset", "NOPE"], &vault, Some("pw"));
+
+    assert_eq!(code(&output), 3);
+    assert_eq!(stdout(&output), "");
+    assert!(!stderr(&output).is_empty());
+}
+
+#[test]
+fn unset_on_missing_vault_fails_with_vault_unavailable() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("vault.age");
+
+    let output = run_with_vault(&["unset", "KEY"], &vault, Some("pw"));
+
+    assert_eq!(code(&output), 4);
     assert_eq!(stdout(&output), "");
 }
 

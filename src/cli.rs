@@ -27,7 +27,7 @@ pub enum Format {
 pub enum Command {
     /// Create a new vault
     Init {
-        /// Overwrite an existing vault
+        /// Overwrite an existing vault, if the passphrase opens it
         #[arg(long)]
         force: bool,
     },
@@ -53,6 +53,11 @@ pub enum Command {
         #[arg(long)]
         reveal: bool,
     },
+    /// Delete a secret
+    Unset {
+        /// Key of the secret
+        key: String,
+    },
     /// List the registered keys
     List,
 }
@@ -64,6 +69,7 @@ impl Command {
             Command::Init { .. } => "init",
             Command::Set { .. } => "set",
             Command::Get { .. } => "get",
+            Command::Unset { .. } => "unset",
             Command::List => "list",
         }
     }
@@ -160,6 +166,14 @@ mod tests {
             panic!("expected get");
         };
         assert!(reveal);
+    }
+
+    #[test]
+    fn unset_takes_only_a_key() {
+        let Command::Unset { key } = parse(&["unset", "KEY"]).expect("should parse").command else {
+            panic!("expected unset");
+        };
+        assert_eq!(key, "KEY");
     }
 
     #[test]

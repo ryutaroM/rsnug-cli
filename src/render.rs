@@ -18,6 +18,13 @@ pub fn set(key: String, format: Format) -> String {
     }
 }
 
+pub fn unset(key: String, format: Format) -> String {
+    match format {
+        Format::Text => format!("Unset {key}\n"),
+        Format::Json => format!("{}\n", json!({ "key": key })),
+    }
+}
+
 pub fn get(outcome: GetOutcome, format: Format) -> String {
     match (outcome, format) {
         (GetOutcome::Metadata { key }, Format::Text) => format!("{key}: exists\n"),

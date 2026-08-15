@@ -7,6 +7,7 @@ pub enum RsnugError {
     PassphraseMissing,
     VaultNotFound(PathBuf),
     VaultAlreadyExists(PathBuf),
+    VaultNotOverwritable(PathBuf),
     DecryptionFailed,
     KeyNotFound(String),
     UnsupportedVaultVersion { found: u32, expected: u32 },
@@ -20,6 +21,7 @@ impl RsnugError {
         match self {
             RsnugError::PassphraseMissing => exit::VAULT_UNAVAILABLE,
             RsnugError::VaultNotFound(_) => exit::VAULT_UNAVAILABLE,
+            RsnugError::VaultNotOverwritable(_) => exit::VAULT_UNAVAILABLE,
             RsnugError::DecryptionFailed => exit::VAULT_UNAVAILABLE,
             RsnugError::VaultAlreadyExists(_) => exit::GENERAL_ERROR,
             RsnugError::UnsupportedVaultVersion { .. } => exit::GENERAL_ERROR,
@@ -43,7 +45,14 @@ impl fmt::Display for RsnugError {
             RsnugError::VaultAlreadyExists(path) => {
                 write!(
                     f,
-                    "vault already exists at {} (use --force)",
+                    "vault already exists at {} (use --force, which requires RSNUG_PASSPHRASE to open it)",
+                    path.display()
+                )
+            }
+            RsnugError::VaultNotOverwritable(path) => {
+                write!(
+                    f,
+                    "refusing to overwrite {} because RSNUG_PASSPHRASE does not open it (delete the file yourself to start over)",
                     path.display()
                 )
             }
