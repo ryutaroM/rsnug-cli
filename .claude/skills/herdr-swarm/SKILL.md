@@ -13,8 +13,8 @@ blocking wait rather than polling.
 
 Beyond building the bee's tab, do not build your own scaffolding around herdr's commands — no
 scratch directories, no report files, no hook settings, no manifest. `herdr agent list` is the
-record: a bee's tab carries a `cwd` but no worktree identity, so `worktree list` and
-`workspace list` never show one.
+record: a bee's tab carries a `cwd` but no worktree identity, so `workspace list` shows no
+worktree for it and `worktree list` shows the worktree with no workspace attached.
 
 ## Preflight
 - HERDR_ENV: !`printenv HERDR_ENV`
@@ -141,27 +141,37 @@ So once every startable role is dispatched, do both, in this order:
 1. **Tell the user first**, in text, before any further tool call: which bees are flying, which
    roles are queued, which are waiting on a dialog only they can answer. Close with a line
    telling them that a report can be lost, and that prompting you is the way to restart a swarm
-   that has gone quiet.
-2. **Arm exactly one blocking wait** on a single outstanding bee — no loop, no timer, no repeated
-   status reads:
+   that has gone quiet — their prompt reaches you once the wait below returns.
+2. **Arm exactly one blocking wait** — no loop, no timer, no repeated status reads. Pick the
+   target from a fresh `herdr agent list`: a bee this run dispatched, never one you handed to the
+   user, and whose `agent_status` is `working`. A bee still `idle` has not picked its prompt up
+   yet, and one sitting on a dialog is already `blocked`; either matches the moment you arm and
+   spins you straight back into the sweep. If no bee qualifies, arm nothing — go to step 6 and
+   sweep instead.
 
    ```bash
-   herdr agent wait <name> --timeout 900000
+   herdr agent wait <name> --timeout 540000
    ```
 
-   `agent wait` takes one target, so pick any one outstanding bee; the sweep in step 6 covers the
-   rest. When it returns, go to step 6.
+   Run it with the Bash tool's own `timeout` set to `600000`, its maximum. Left at the default
+   the tool kills the call after two minutes, and you read your own kill as a herdr timeout — a
+   two-minute poll wearing the costume of a blocking wait. Leave `--until` off: the default
+   idle/done/blocked is what catches a bee ending its turn, and a claude bee returns to `idle`
+   rather than `done` when it finishes.
 
-If a bee reports before the wait returns, that report is a new turn — handle it in step 6 and
-let it re-arm the wait. If no bee is outstanding, do not arm anything; stop.
+   `agent wait` takes one target; the sweep in step 6 covers the rest. When it returns, go to
+   step 6.
 
-On timeout, sweep as in step 6, report the increment, and re-arm **once**. If a second timeout
-passes with nothing changed, stop and hand it to the user — do not keep re-arming.
+The wait holds you inside a tool call, so nothing reaches you while it runs: another bee's
+report, even a `BLOCKED` one, and anything the user prompts both queue until it returns. That
+latency is the price of never deadlocking on a lost report, and the nine-minute bound is what
+keeps it payable — do not raise it. If no bee is outstanding, do not arm anything; stop.
 
 ## 6. Handle a report
 
 You enter here two ways: a turn starting with `[swarm:<name>]`, which is a bee reporting, or the
-step 5 wait returning. Either way, handle it in one pass — with no report in hand, start at 3:
+step 5 wait returning. Either way, handle it in one pass — with no report in hand, skip 1 and run
+2 through 4:
 
 1. Take the `STATUS:` line.
    `DONE` — record the outcome and free the slot.
@@ -175,8 +185,14 @@ step 5 wait returning. Either way, handle it in one pass — with no report in h
    lost in transit, in which case take it from there. Otherwise re-prompt it for the report — it
    ended its turn without running the command. A bee the user has unblocked shows up ready here;
    dispatch its role then.
-4. Report the increment to the user in text, then re-arm the step 5 wait on one still-outstanding
-   bee. If none is outstanding, go to step 7.
+4. Report the increment to the user in text, then re-arm the step 5 wait, target rules and all.
+   If no bee is outstanding, go to step 7.
+
+   Count consecutive passes through this step that changed nothing — no report, no status moved,
+   no slot freed — including a pass you reached because no bee qualified to be waited on. Any
+   report, and any change the sweep finds, resets the count to zero. At two, stop instead of
+   re-arming: tell the user which bees are still flying, and that a late report or a prompt from
+   them wakes you.
 
 Screen reads are a fallback, not truth: `herdr agent read <name> --source recent-unwrapped
 --lines 120`. If raising `--lines` reveals nothing more, the output is on the alternate screen
