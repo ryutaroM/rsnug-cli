@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::error::RsnugError;
 use age::secrecy::ExposeSecret;
 use std::path::{Path, PathBuf};
@@ -34,7 +32,7 @@ pub fn resolve_path(explicit: Option<PathBuf>) -> Result<PathBuf, RsnugError> {
     default_path()
 }
 
-pub fn load(path: &Path) -> Result<age::x25519::Identity, RsnugError> {
+pub fn load(path: &Path) -> Result<Vec<age::x25519::Identity>, RsnugError> {
     let metadata = match std::fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -46,13 +44,19 @@ pub fn load(path: &Path) -> Result<age::x25519::Identity, RsnugError> {
     check_permissions(path, &metadata)?;
 
     let contents = std::fs::read_to_string(path)?;
-
-    contents
+    let identities = contents
         .lines()
         .map(str::trim)
-        .find(|line| !line.is_empty() && !line.starts_with('#'))
-        .and_then(|line| age::x25519::Identity::from_str(line).ok())
-        .ok_or_else(|| RsnugError::KeyFileInvalid(path.to_path_buf()))
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(age::x25519::Identity::from_str)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| RsnugError::KeyFileInvalid(path.to_path_buf()))?;
+
+    if identities.is_empty() {
+        return Err(RsnugError::KeyFileInvalid(path.to_path_buf()));
+    }
+
+    Ok(identities)
 }
 
 pub fn generate(path: &Path) -> Result<age::x25519::Identity, RsnugError> {
@@ -66,18 +70,46 @@ pub fn generate(path: &Path) -> Result<age::x25519::Identity, RsnugError> {
     }
 
     let identity = age::x25519::Identity::generate();
-    let contents = format!(
-        "# public key: {}\n{}\n",
-        identity.to_public(),
-        identity.to_string().expose_secret()
-    );
-
-    let temp_path = path.with_extension("tmp");
-    std::fs::write(&temp_path, contents.as_bytes())?;
+    let temp_path = temp_path(path);
+    std::fs::write(&temp_path, entry(&identity).as_bytes())?;
     set_private_permissions(&temp_path, 0o600)?;
     std::fs::rename(&temp_path, path)?;
 
     Ok(identity)
+}
+
+pub fn append(path: &Path) -> Result<age::x25519::Identity, RsnugError> {
+    use std::io::Write;
+
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(RsnugError::KeyFileNotFound(path.to_path_buf()));
+        }
+        Err(err) => return Err(RsnugError::Io(err)),
+    };
+    check_permissions(path, &metadata)?;
+
+    let identity = age::x25519::Identity::generate();
+    let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
+    file.write_all(entry(&identity).as_bytes())?;
+    file.sync_all()?;
+
+    Ok(identity)
+}
+
+fn entry(identity: &age::x25519::Identity) -> String {
+    format!(
+        "# public key: {}\n{}\n",
+        identity.to_public(),
+        identity.to_string().expose_secret()
+    )
+}
+
+fn temp_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".tmp");
+    PathBuf::from(name)
 }
 
 #[cfg(unix)]
@@ -192,7 +224,7 @@ mod tests {
         let loaded = load(&path).expect("load");
 
         assert_eq!(
-            loaded.to_public().to_string(),
+            loaded[0].to_public().to_string(),
             generated.to_public().to_string()
         );
     }
@@ -213,7 +245,7 @@ mod tests {
         let loaded = load(&path).expect("load");
 
         assert_eq!(
-            loaded.to_public().to_string(),
+            loaded[0].to_public().to_string(),
             identity.to_public().to_string()
         );
     }
@@ -334,6 +366,72 @@ mod tests {
             .map(|entry| entry.expect("entry").path())
             .collect();
         assert_eq!(entries, vec![path]);
+    }
+
+    #[test]
+    fn load_returns_every_identity_in_the_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("key");
+        let first = age::x25519::Identity::generate();
+        let second = age::x25519::Identity::generate();
+        write_key_file(&path, &format!("{}{}", entry(&first), entry(&second)));
+
+        let loaded = load(&path).expect("load");
+
+        assert_eq!(
+            loaded
+                .iter()
+                .map(|identity| identity.to_public().to_string())
+                .collect::<Vec<_>>(),
+            vec![
+                first.to_public().to_string(),
+                second.to_public().to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_single_unparsable_line_invalidates_the_whole_key_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("key");
+        let good = age::x25519::Identity::generate();
+        write_key_file(&path, &format!("{}AGE-SECRET-KEY-1NOTREAL\n", entry(&good)));
+
+        let result = load(&path);
+
+        assert!(
+            matches!(result, Err(RsnugError::KeyFileInvalid(reported)) if reported == path),
+            "a broken line is a lost key, so it must not be skipped silently"
+        );
+    }
+
+    #[test]
+    fn append_adds_an_identity_and_keeps_the_existing_ones() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("key");
+        let original = generate(&path).expect("generate");
+
+        let added = append(&path).expect("append");
+        let loaded = load(&path).expect("load");
+
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(
+            loaded[0].to_public().to_string(),
+            original.to_public().to_string()
+        );
+        assert_eq!(
+            loaded[1].to_public().to_string(),
+            added.to_public().to_string()
+        );
+    }
+
+    #[test]
+    fn append_on_a_missing_key_file_is_an_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let result = append(&dir.path().join("key"));
+
+        assert!(matches!(result, Err(RsnugError::KeyFileNotFound(_))));
     }
 
     fn write_key_file(path: &Path, contents: &str) {

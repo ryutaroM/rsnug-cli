@@ -9,6 +9,10 @@ pub struct Cli {
     #[arg(short = 'f', long, value_name = "PATH", global = true)]
     pub vault: Option<PathBuf>,
 
+    /// Path to the age key file
+    #[arg(long, value_name = "PATH", global = true)]
+    pub key_file: Option<PathBuf>,
+
     /// Output format
     #[arg(long, value_enum, default_value_t = Format::Text, global = true)]
     pub format: Format,
@@ -27,9 +31,13 @@ pub enum Format {
 pub enum Command {
     /// Create a new vault
     Init {
-        /// Overwrite an existing vault, if the passphrase opens it
+        /// Overwrite an existing vault, if the key file opens it
         #[arg(long)]
         force: bool,
+
+        /// Append a fresh identity to the key file and use it for this vault
+        #[arg(long)]
+        new_key: bool,
     },
     /// Set a secret
     Set {
@@ -60,6 +68,8 @@ pub enum Command {
     },
     /// List the registered keys
     List,
+    /// Re-encrypt a passphrase vault to the key file
+    Migrate,
 }
 
 impl Command {
@@ -71,6 +81,7 @@ impl Command {
             Command::Get { .. } => "get",
             Command::Unset { .. } => "unset",
             Command::List => "list",
+            Command::Migrate => "migrate",
         }
     }
 }

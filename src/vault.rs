@@ -6,6 +6,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 const CURRENT_VERSION: u32 = 1;
+const MAX_SCRYPT_WORK_FACTOR: u8 = 22;
 
 #[derive(Serialize, Deserialize)]
 pub struct VaultData {
@@ -60,30 +61,34 @@ pub fn resolve_path(explicit: Option<PathBuf>) -> Result<PathBuf, RsnugError> {
     }
 }
 
-pub fn load(path: &Path, identity: &age::x25519::Identity) -> Result<VaultData, RsnugError> {
+pub fn load(
+    path: &Path,
+    identities: &[age::x25519::Identity],
+) -> Result<(VaultData, age::x25519::Recipient), RsnugError> {
     let ciphertext = read_vault(path)?;
-    let plaintext = decrypt(&ciphertext, identity, path)?;
-    parse(&plaintext)
+    let (plaintext, recipient) = decrypt(&ciphertext, identities, path)?;
+    Ok((parse(&plaintext)?, recipient))
 }
 
-#[allow(dead_code)]
 pub fn load_legacy(path: &Path, passphrase: &SecretString) -> Result<VaultData, RsnugError> {
     let ciphertext = read_vault(path)?;
     let plaintext = decrypt_legacy(&ciphertext, passphrase)?;
     parse(&plaintext)
 }
 
-#[allow(dead_code)]
 pub fn is_legacy(path: &Path) -> Result<bool, RsnugError> {
-    let ciphertext = std::fs::read(path)?;
+    let ciphertext = read_vault(path)?;
     let decryptor =
         age::Decryptor::new(&ciphertext[..]).map_err(|_| RsnugError::DecryptionFailed)?;
     Ok(decryptor.is_scrypt())
 }
 
-pub fn is_decryptable(path: &Path, identity: &age::x25519::Identity) -> Result<bool, RsnugError> {
-    let ciphertext = std::fs::read(path)?;
-    Ok(decrypt(&ciphertext, identity, path).is_ok())
+pub fn is_decryptable(
+    path: &Path,
+    identities: &[age::x25519::Identity],
+) -> Result<bool, RsnugError> {
+    let ciphertext = read_vault(path)?;
+    Ok(decrypt(&ciphertext, identities, path).is_ok())
 }
 
 fn read_vault(path: &Path) -> Result<Vec<u8>, RsnugError> {
@@ -156,29 +161,43 @@ fn encrypt(plaintext: &[u8], recipient: &age::x25519::Recipient) -> Result<Vec<u
 
 fn decrypt(
     ciphertext: &[u8],
-    identity: &age::x25519::Identity,
+    identities: &[age::x25519::Identity],
     path: &Path,
-) -> Result<Vec<u8>, RsnugError> {
+) -> Result<(Vec<u8>, age::x25519::Recipient), RsnugError> {
     let decryptor = age::Decryptor::new(ciphertext).map_err(|_| RsnugError::DecryptionFailed)?;
 
     if decryptor.is_scrypt() {
         return Err(RsnugError::LegacyVault(path.to_path_buf()));
     }
 
-    let reader = decryptor
-        .decrypt(std::iter::once(identity as _))
-        .map_err(|_| RsnugError::DecryptionFailed)?;
-    read_plaintext(reader)
+    drop(decryptor);
+
+    for identity in identities {
+        let Ok(decryptor) = age::Decryptor::new(ciphertext) else {
+            continue;
+        };
+        let Ok(reader) = decryptor.decrypt(std::iter::once(identity as _)) else {
+            continue;
+        };
+        return Ok((read_plaintext(reader)?, identity.to_public()));
+    }
+
+    Err(RsnugError::DecryptionFailed)
 }
 
-#[allow(dead_code)]
 fn decrypt_legacy(ciphertext: &[u8], passphrase: &SecretString) -> Result<Vec<u8>, RsnugError> {
     let decryptor = age::Decryptor::new(ciphertext).map_err(|_| RsnugError::DecryptionFailed)?;
     let mut identity = age::scrypt::Identity::new(passphrase.clone());
-    identity.set_max_work_factor(22);
+    identity.set_max_work_factor(MAX_SCRYPT_WORK_FACTOR);
     let reader = decryptor
         .decrypt(std::iter::once(&identity as _))
-        .map_err(|_| RsnugError::DecryptionFailed)?;
+        .map_err(|err| match err {
+            age::DecryptError::ExcessiveWork { required, .. } => RsnugError::ExcessiveWork {
+                required,
+                max: MAX_SCRYPT_WORK_FACTOR,
+            },
+            _ => RsnugError::DecryptionFailed,
+        })?;
     read_plaintext(reader)
 }
 
@@ -210,24 +229,69 @@ mod tests {
         ciphertext
     }
 
+    fn with_work_factor(ciphertext: &[u8], log_n: u8) -> Vec<u8> {
+        let tag = b"-> scrypt ";
+        let start = ciphertext
+            .windows(tag.len())
+            .position(|window| window == tag)
+            .expect("scrypt stanza");
+        let end = start
+            + ciphertext[start..]
+                .iter()
+                .position(|&byte| byte == b'\n')
+                .expect("line end");
+        let line = std::str::from_utf8(&ciphertext[start..end]).expect("ascii stanza");
+        let salt = line.split(' ').nth(2).expect("salt");
+
+        let mut patched = ciphertext[..start].to_vec();
+        patched.extend_from_slice(format!("-> scrypt {salt} {log_n}").as_bytes());
+        patched.extend_from_slice(&ciphertext[end..]);
+        patched
+    }
+
     #[test]
     fn encrypt_then_decrypt_round_trips() {
         let identity = age::x25519::Identity::generate();
         let plaintext = b"hello vault";
         let ciphertext = encrypt(plaintext, &identity.to_public()).expect("encrypt");
-        let decrypted = decrypt(&ciphertext, &identity, Path::new("vault.age")).expect("decrypt");
+        let identities = vec![identity];
+
+        let (decrypted, _) =
+            decrypt(&ciphertext, &identities, Path::new("vault.age")).expect("decrypt");
+
         assert_eq!(decrypted, plaintext);
     }
 
     #[test]
     fn a_different_identity_cannot_open_the_vault() {
         let identity = age::x25519::Identity::generate();
-        let other = age::x25519::Identity::generate();
+        let others = vec![age::x25519::Identity::generate()];
         let ciphertext = encrypt(b"hello vault", &identity.to_public()).expect("encrypt");
 
-        let result = decrypt(&ciphertext, &other, Path::new("vault.age"));
+        let result = decrypt(&ciphertext, &others, Path::new("vault.age"));
 
         assert!(matches!(result, Err(RsnugError::DecryptionFailed)));
+    }
+
+    #[test]
+    fn any_identity_in_the_list_can_open_the_vault() {
+        let wanted = age::x25519::Identity::generate();
+        let ciphertext = encrypt(b"hello vault", &wanted.to_public()).expect("encrypt");
+        let identities = vec![
+            age::x25519::Identity::generate(),
+            wanted,
+            age::x25519::Identity::generate(),
+        ];
+
+        let (decrypted, recipient) =
+            decrypt(&ciphertext, &identities, Path::new("vault.age")).expect("decrypt");
+
+        assert_eq!(decrypted, b"hello vault");
+        assert_eq!(
+            recipient.to_string(),
+            identities[1].to_public().to_string(),
+            "decrypt must report the identity that actually opened the vault"
+        );
     }
 
     #[test]
@@ -254,13 +318,46 @@ mod tests {
         let v1 = br#"{"version":1,"entries":{"KEY":"VALUE"}}"#;
         std::fs::write(&path, legacy_ciphertext(v1, &passphrase("pw"), 12)).expect("write");
 
-        let result = load(&path, &age::x25519::Identity::generate());
+        let result = load(&path, &[age::x25519::Identity::generate()]);
 
         assert!(matches!(result, Err(RsnugError::LegacyVault(reported)) if reported == path));
     }
 
     #[test]
-    fn load_legacy_opens_a_vault_written_with_a_high_work_factor() {
+    fn load_legacy_opens_a_scrypt_vault() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.age");
+        let v1 = br#"{"version":1,"entries":{"KEY":"VALUE"}}"#;
+        std::fs::write(&path, legacy_ciphertext(v1, &passphrase("pw"), 12)).expect("write");
+
+        let data = load_legacy(&path, &passphrase("pw")).expect("load legacy");
+
+        assert_eq!(data.get("KEY"), Some("VALUE"));
+    }
+
+    #[test]
+    fn a_work_factor_above_the_ceiling_is_reported_as_excessive_work() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.age");
+        let cheap = legacy_ciphertext(b"{}", &passphrase("pw"), 10);
+        let beyond = MAX_SCRYPT_WORK_FACTOR + 1;
+        std::fs::write(&path, with_work_factor(&cheap, beyond)).expect("write");
+
+        let result = load_legacy(&path, &passphrase("pw"));
+
+        assert!(
+            matches!(
+                result,
+                Err(RsnugError::ExcessiveWork { required, max })
+                    if required == beyond && max == MAX_SCRYPT_WORK_FACTOR
+            ),
+            "an unopenable work factor must not be reported as a wrong passphrase"
+        );
+    }
+
+    #[test]
+    #[ignore = "encrypts and decrypts at log_n 20, which takes minutes in a debug build"]
+    fn load_legacy_opens_a_vault_written_above_the_local_work_factor_ceiling() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("vault.age");
         let v1 = br#"{"version":1,"entries":{"KEY":"VALUE"}}"#;
@@ -279,7 +376,7 @@ mod tests {
         let v1 = br#"{"version":1,"entries":{"KEY":"VALUE"}}"#;
         std::fs::write(&path, encrypt(v1, &identity.to_public()).expect("encrypt")).expect("write");
 
-        let data = load(&path, &identity).expect("load");
+        let (data, _) = load(&path, &[identity]).expect("load");
 
         assert_eq!(data.get("KEY"), Some("VALUE"));
     }
@@ -291,9 +388,9 @@ mod tests {
         let identity = age::x25519::Identity::generate();
         save(&path, &VaultData::empty(), &identity.to_public()).expect("save");
 
-        assert_eq!(is_decryptable(&path, &identity).ok(), Some(true));
+        assert_eq!(is_decryptable(&path, &[identity]).ok(), Some(true));
         assert_eq!(
-            is_decryptable(&path, &age::x25519::Identity::generate()).ok(),
+            is_decryptable(&path, &[age::x25519::Identity::generate()]).ok(),
             Some(false)
         );
     }
@@ -305,7 +402,7 @@ mod tests {
         std::fs::write(&path, b"not an age file").expect("write");
 
         assert_eq!(
-            is_decryptable(&path, &age::x25519::Identity::generate()).ok(),
+            is_decryptable(&path, &[age::x25519::Identity::generate()]).ok(),
             Some(false)
         );
     }
@@ -313,10 +410,10 @@ mod tests {
     #[test]
     fn is_decryptable_reports_an_unreadable_file_as_an_error() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let identity = age::x25519::Identity::generate();
+        let identities = vec![age::x25519::Identity::generate()];
 
-        assert!(is_decryptable(&dir.path().join("missing.age"), &identity).is_err());
-        assert!(is_decryptable(dir.path(), &identity).is_err());
+        assert!(is_decryptable(&dir.path().join("missing.age"), &identities).is_err());
+        assert!(is_decryptable(dir.path(), &identities).is_err());
     }
 
     #[test]
@@ -331,7 +428,7 @@ mod tests {
         )
         .expect("write");
 
-        assert!(load(&path, &identity).is_err());
+        assert!(load(&path, &[identity]).is_err());
     }
 
     #[test]
@@ -358,14 +455,15 @@ mod tests {
         save(&path, &data, &identity.to_public()).expect("save");
 
         let ciphertext = std::fs::read(&path).expect("read");
-        let plaintext = decrypt(&ciphertext, &identity, &path).expect("decrypt");
+        let (plaintext, _) = decrypt(&ciphertext, &[identity], &path).expect("decrypt");
 
         assert!(!String::from_utf8_lossy(&plaintext).contains("SUPERSECRET"));
     }
 
     fn on_disk_version(path: &Path, identity: &age::x25519::Identity) -> u64 {
         let ciphertext = std::fs::read(path).expect("read");
-        let plaintext = decrypt(&ciphertext, identity, path).expect("decrypt");
+        let (plaintext, _) =
+            decrypt(&ciphertext, std::slice::from_ref(identity), path).expect("decrypt");
         let value: serde_json::Value = serde_json::from_slice(&plaintext).expect("json");
         value["version"].as_u64().expect("version is a number")
     }

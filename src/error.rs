@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::exit;
 use std::fmt;
 use std::path::PathBuf;
@@ -12,6 +10,7 @@ pub enum RsnugError {
     KeyFileAlreadyExists(PathBuf),
     LegacyVault(PathBuf),
     LegacyPassphraseMissing,
+    ExcessiveWork { required: u8, max: u8 },
     VaultAlreadyMigrated(PathBuf),
     VaultNotFound(PathBuf),
     VaultAlreadyExists(PathBuf),
@@ -32,6 +31,7 @@ impl RsnugError {
             RsnugError::KeyFileInvalid(_) => exit::VAULT_UNAVAILABLE,
             RsnugError::LegacyVault(_) => exit::VAULT_UNAVAILABLE,
             RsnugError::LegacyPassphraseMissing => exit::VAULT_UNAVAILABLE,
+            RsnugError::ExcessiveWork { .. } => exit::VAULT_UNAVAILABLE,
             RsnugError::VaultNotFound(_) => exit::VAULT_UNAVAILABLE,
             RsnugError::VaultNotOverwritable(_) => exit::VAULT_UNAVAILABLE,
             RsnugError::DecryptionFailed => exit::VAULT_UNAVAILABLE,
@@ -88,6 +88,12 @@ impl fmt::Display for RsnugError {
             }
             RsnugError::LegacyPassphraseMissing => {
                 write!(f, "RSNUG_PASSPHRASE is not set")
+            }
+            RsnugError::ExcessiveWork { required, max } => {
+                write!(
+                    f,
+                    "vault needs scrypt work factor {required}, above the {max} rsnug accepts"
+                )
             }
             RsnugError::VaultAlreadyMigrated(path) => {
                 write!(f, "vault at {} already uses a key file", path.display())
