@@ -76,10 +76,9 @@ pub fn migrate(
     let data = vault::load_legacy(path, passphrase)?;
 
     let backup = backup_path(path);
-    if backup.exists() {
+    if backup.exists() && std::fs::read(&backup)? != std::fs::read(path)? {
         return Err(RsnugError::BackupAlreadyExists(backup));
     }
-    std::fs::copy(path, &backup)?;
 
     let recipient = match key::load(key_file) {
         Ok(identities) => recipient_for(key_file, false, identities)?,
@@ -87,6 +86,7 @@ pub fn migrate(
         Err(err) => return Err(err),
     };
 
+    std::fs::copy(path, &backup)?;
     vault::save(path, &data, &recipient)?;
 
     Ok(MigrateOutcome {

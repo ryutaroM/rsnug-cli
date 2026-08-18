@@ -894,6 +894,86 @@ fn migrate_refuses_to_clobber_an_existing_backup() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn migrate_that_stops_at_the_key_file_leaves_no_backup_behind() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("vault.age");
+    let key = dir.path().join("key");
+    legacy_vault(&vault, "pw", r#"{"KEY":"VALUE"}"#);
+    write_key(&key);
+    set_key_mode(&key, 0o644);
+
+    let refused = run_with_passphrase(&["migrate"], &vault, &key, "pw");
+
+    assert_ne!(code(&refused), 0);
+    let backup = dir.path().join("vault.age.bak");
+    assert!(
+        !backup.exists(),
+        "a migrate that never rewrote the vault must not leave a backup that blocks the retry"
+    );
+
+    set_key_mode(&key, 0o600);
+    let retried = run_with_passphrase(&["migrate"], &vault, &key, "pw");
+
+    assert_eq!(code(&retried), 0, "{}", stderr(&retried));
+    assert_eq!(run_ok(&["get", "KEY", "--reveal"], &vault, &key), "VALUE\n");
+}
+
+#[test]
+fn migrate_reuses_the_backup_it_already_made_of_the_same_vault() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("vault.age");
+    let key = dir.path().join("key");
+    legacy_vault(&vault, "pw", r#"{"KEY":"VALUE"}"#);
+    let original = std::fs::read(&vault).expect("read vault");
+    let backup = dir.path().join("vault.age.bak");
+    std::fs::write(&backup, &original).expect("write backup");
+
+    let output = run_with_passphrase(&["migrate"], &vault, &key, "pw");
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert_eq!(std::fs::read(&backup).expect("read backup"), original);
+    assert_eq!(run_ok(&["get", "KEY", "--reveal"], &vault, &key), "VALUE\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_key_file_that_could_not_be_written_is_not_left_behind() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("vault.age");
+    let key = dir.path().join("key");
+
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "ulimit -f 0; exec '{}' --vault '{}' --key-file '{}' init",
+            env!("CARGO_BIN_EXE_rsnug"),
+            vault.display(),
+            key.display()
+        ))
+        .stdin(Stdio::null())
+        .env_remove("RSNUG_PASSPHRASE")
+        .env_remove("RSNUG_KEY_FILE")
+        .output()
+        .expect("failed to run rsnug");
+
+    assert!(!output.status.success());
+    assert!(
+        !key.exists(),
+        "a key file rsnug could not write must not survive to block the next init"
+    );
+
+    let retried = run_with_vault(&["init"], &vault, &key);
+
+    assert_eq!(code(&retried), 0, "{}", stderr(&retried));
+    assert_eq!(
+        code(&run_with_vault(&["set", "KEY", "VALUE"], &vault, &key)),
+        0
+    );
+    assert_eq!(run_ok(&["get", "KEY", "--reveal"], &vault, &key), "VALUE\n");
+}
+
 #[test]
 fn a_bare_relative_key_file_name_is_usable() {
     let dir = tempfile::tempdir().expect("tempdir");

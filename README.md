@@ -101,7 +101,7 @@ Vaults created before this scheme were encrypted with `RSNUG_PASSPHRASE`. Runnin
 RSNUG_PASSPHRASE="your-old-passphrase" rsnug migrate
 ```
 
-This decrypts with the passphrase, copies the vault to `<vault>.age.bak`, generates the key file if you do not have one, and re-encrypts to it. The backup is left in place; delete it yourself once you have confirmed the migration, and remove `RSNUG_PASSPHRASE` from your shell profile.
+This decrypts with the passphrase, generates the key file if you do not have one, copies the vault to `<vault>.age.bak`, and re-encrypts to the key. A migrate that stops before rewriting the vault leaves no backup behind, so it is safe to fix whatever it complained about and run it again. The backup is left in place; delete it yourself once you have confirmed the migration, and remove `RSNUG_PASSPHRASE` from your shell profile.
 
 ## Contract with agents
 

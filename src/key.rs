@@ -65,19 +65,13 @@ pub fn generate(path: &Path) -> Result<age::x25519::Identity, RsnugError> {
     fsutil::prepare_parent(path)?;
 
     let identity = age::x25519::Identity::generate();
-    let mut file = match fsutil::create_private(path) {
-        Ok(file) => file,
+    match fsutil::create_private_atomic(path, entry(&identity).as_bytes()) {
+        Ok(()) => Ok(identity),
         Err(RsnugError::Io(err)) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err(RsnugError::KeyFileAlreadyExists(path.to_path_buf()));
+            Err(RsnugError::KeyFileAlreadyExists(path.to_path_buf()))
         }
-        Err(err) => return Err(err),
-    };
-
-    use std::io::Write;
-    file.write_all(entry(&identity).as_bytes())?;
-    file.sync_all()?;
-
-    Ok(identity)
+        Err(err) => Err(err),
+    }
 }
 
 pub fn append(path: &Path) -> Result<age::x25519::Identity, RsnugError> {

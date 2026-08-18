@@ -1,5 +1,4 @@
 use crate::error::RsnugError;
-use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -17,13 +16,23 @@ pub fn prepare_parent(path: &Path) -> Result<(), RsnugError> {
     set_private_permissions(parent, 0o700)
 }
 
-pub fn create_private(path: &Path) -> Result<File, RsnugError> {
-    let file = private_options().create_new(true).open(path)?;
-    set_private_permissions(path, 0o600)?;
-    Ok(file)
+pub fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<(), RsnugError> {
+    let temp = write_temp_private(path, bytes)?;
+    if let Err(err) = std::fs::rename(&temp, path) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(RsnugError::Io(err));
+    }
+    Ok(())
 }
 
-pub fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<(), RsnugError> {
+pub fn create_private_atomic(path: &Path, bytes: &[u8]) -> Result<(), RsnugError> {
+    let temp = write_temp_private(path, bytes)?;
+    let linked = std::fs::hard_link(&temp, path);
+    let _ = std::fs::remove_file(&temp);
+    linked.map_err(RsnugError::Io)
+}
+
+fn write_temp_private(path: &Path, bytes: &[u8]) -> Result<PathBuf, RsnugError> {
     let temp = temp_sibling(path);
     let mut file = private_options().create_new(true).open(&temp)?;
     set_private_permissions(&temp, 0o600)?;
@@ -31,12 +40,7 @@ pub fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<(), RsnugError>
         let _ = std::fs::remove_file(&temp);
         return Err(RsnugError::Io(err));
     }
-    drop(file);
-    if let Err(err) = std::fs::rename(&temp, path) {
-        let _ = std::fs::remove_file(&temp);
-        return Err(RsnugError::Io(err));
-    }
-    Ok(())
+    Ok(temp)
 }
 
 fn temp_sibling(path: &Path) -> PathBuf {
@@ -111,14 +115,46 @@ mod tests {
         assert!(prepare_parent(Path::new("mykey")).is_ok());
     }
 
+    #[cfg(unix)]
     #[test]
-    fn create_private_refuses_an_existing_path() {
+    fn create_private_atomic_writes_the_bytes_privately() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("key");
+
+        create_private_atomic(&path, b"payload").expect("write");
+
+        assert_eq!(std::fs::read(&path).expect("read"), b"payload");
+        assert_eq!(mode_of(&path), 0o600);
+    }
+
+    #[test]
+    fn create_private_atomic_refuses_an_existing_path() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("key");
         std::fs::write(&path, b"original").expect("write");
 
-        assert!(create_private(&path).is_err());
+        match create_private_atomic(&path, b"payload") {
+            Err(RsnugError::Io(err)) => {
+                assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+            }
+            other => panic!("expected AlreadyExists, got {other:?}"),
+        }
         assert_eq!(std::fs::read(&path).expect("read"), b"original");
+    }
+
+    #[test]
+    fn create_private_atomic_leaves_no_temp_file_behind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("key");
+
+        create_private_atomic(&path, b"payload").expect("write");
+        assert!(create_private_atomic(&path, b"payload").is_err());
+
+        let entries: Vec<PathBuf> = std::fs::read_dir(dir.path())
+            .expect("read_dir")
+            .map(|entry| entry.expect("entry").path())
+            .collect();
+        assert_eq!(entries, vec![path]);
     }
 
     #[cfg(unix)]
