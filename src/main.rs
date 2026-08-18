@@ -2,7 +2,8 @@ mod cli;
 mod commands;
 mod error;
 mod exit;
-mod passphrase;
+mod fsutil;
+mod key;
 mod render;
 mod vault;
 
@@ -12,6 +13,8 @@ use cli::{Cli, Command};
 use error::RsnugError;
 use std::io::Read;
 use std::process::ExitCode;
+
+const LEGACY_ENV_VAR: &str = "RSNUG_PASSPHRASE";
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -31,28 +34,59 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<String, RsnugError> {
     let vault_path = vault::resolve_path(cli.vault)?;
-    let passphrase = passphrase::resolve()?;
+    let key_path = key::resolve_path(cli.key_file)?;
 
     match cli.command {
-        Command::Init { force } => commands::init(&vault_path, &passphrase, force)
+        Command::Init { force, new_key } => commands::init(&vault_path, &key_path, force, new_key)
             .map(|outcome| render::init(outcome, cli.format)),
+        Command::Migrate => commands::migrate(&vault_path, &key_path, &legacy_passphrase()?)
+            .map(|outcome| render::migrate(outcome, cli.format)),
         Command::Set { key, value, stdin } => {
+            let identities = identities_for(&vault_path, &key_path)?;
             let value = SecretString::from(if stdin {
                 read_stdin_value()?
             } else {
                 value.expect("clap guarantees value xor stdin")
             });
-            commands::set(&vault_path, &passphrase, key.clone(), value)
+            commands::set(&vault_path, &identities, key.clone(), value)
                 .map(|()| render::set(key, cli.format))
         }
-        Command::Get { key, reveal } => commands::get(&vault_path, &passphrase, &key, reveal)
-            .map(|outcome| render::get(outcome, cli.format)),
+        Command::Get { key, reveal } => {
+            let identities = identities_for(&vault_path, &key_path)?;
+            commands::get(&vault_path, &identities, &key, reveal)
+                .map(|outcome| render::get(outcome, cli.format))
+        }
         Command::Unset { key } => {
-            commands::unset(&vault_path, &passphrase, &key).map(|()| render::unset(key, cli.format))
+            let identities = identities_for(&vault_path, &key_path)?;
+            commands::unset(&vault_path, &identities, &key).map(|()| render::unset(key, cli.format))
         }
         Command::List => {
-            commands::list(&vault_path, &passphrase).map(|keys| render::list(keys, cli.format))
+            let identities = identities_for(&vault_path, &key_path)?;
+            commands::list(&vault_path, &identities).map(|keys| render::list(keys, cli.format))
         }
+    }
+}
+
+fn identities_for(
+    vault_path: &std::path::Path,
+    key_path: &std::path::Path,
+) -> Result<Vec<age::x25519::Identity>, RsnugError> {
+    match key::load(key_path) {
+        Err(RsnugError::KeyFileNotFound(missing)) => {
+            if vault::is_legacy(vault_path).unwrap_or(false) {
+                Err(RsnugError::LegacyVault(vault_path.to_path_buf()))
+            } else {
+                Err(RsnugError::KeyFileNotFound(missing))
+            }
+        }
+        other => other,
+    }
+}
+
+fn legacy_passphrase() -> Result<SecretString, RsnugError> {
+    match std::env::var(LEGACY_ENV_VAR) {
+        Ok(value) if !value.is_empty() => Ok(SecretString::from(value)),
+        _ => Err(RsnugError::LegacyPassphraseMissing),
     }
 }
 

@@ -1,13 +1,29 @@
 use crate::cli::Format;
-use crate::commands::{GetOutcome, InitOutcome};
+use crate::commands::{GetOutcome, InitOutcome, MigrateOutcome};
 use age::secrecy::ExposeSecret;
 use serde_json::json;
 
 pub fn init(outcome: InitOutcome, format: Format) -> String {
     let path = outcome.path.display().to_string();
+    let key_file = outcome.key_file.display().to_string();
     match format {
-        Format::Text => format!("Initialized vault at {path}\n"),
-        Format::Json => format!("{}\n", json!({ "path": path })),
+        Format::Text => format!("Initialized vault at {path} (key: {key_file})\n"),
+        Format::Json => format!("{}\n", json!({ "path": path, "key_file": key_file })),
+    }
+}
+
+pub fn migrate(outcome: MigrateOutcome, format: Format) -> String {
+    let path = outcome.path.display().to_string();
+    let key_file = outcome.key_file.display().to_string();
+    let backup = outcome.backup.display().to_string();
+    match format {
+        Format::Text => {
+            format!("Migrated vault at {path} (key: {key_file}, backup: {backup})\n")
+        }
+        Format::Json => format!(
+            "{}\n",
+            json!({ "path": path, "key_file": key_file, "backup": backup })
+        ),
     }
 }
 
