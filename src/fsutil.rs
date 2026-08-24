@@ -22,14 +22,31 @@ pub fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<(), RsnugError>
         let _ = std::fs::remove_file(&temp);
         return Err(RsnugError::Io(err));
     }
-    Ok(())
+    sync_parent(path)
 }
 
 pub fn create_private_atomic(path: &Path, bytes: &[u8]) -> Result<(), RsnugError> {
     let temp = write_temp_private(path, bytes)?;
     let linked = std::fs::hard_link(&temp, path);
     let _ = std::fs::remove_file(&temp);
-    linked.map_err(RsnugError::Io)
+    linked.map_err(RsnugError::Io)?;
+    sync_parent(path)
+}
+
+// A renamed file is only durable once the directory entry itself reaches disk.
+#[cfg(unix)]
+pub fn sync_parent(path: &Path) -> Result<(), RsnugError> {
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    std::fs::File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn sync_parent(_path: &Path) -> Result<(), RsnugError> {
+    Ok(())
 }
 
 fn write_temp_private(path: &Path, bytes: &[u8]) -> Result<PathBuf, RsnugError> {
@@ -192,6 +209,29 @@ mod tests {
             .map(|entry| entry.expect("entry").path())
             .collect();
         assert_eq!(entries, vec![path]);
+    }
+
+    #[test]
+    fn sync_parent_flushes_the_directory_that_holds_the_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("secret");
+        std::fs::write(&path, b"payload").expect("write");
+
+        sync_parent(&path).expect("sync");
+    }
+
+    #[test]
+    fn sync_parent_accepts_a_bare_relative_name() {
+        assert!(sync_parent(Path::new("mykey")).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_parent_reports_a_parent_that_is_gone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("missing").join("secret");
+
+        assert!(sync_parent(&missing).is_err());
     }
 
     #[cfg(unix)]
