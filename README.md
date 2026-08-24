@@ -151,6 +151,19 @@ All diagnostic messages and errors go to stderr. stdout carries only the command
 | 2 | usage error (missing/conflicting arguments, unknown command) |
 | 3 | key does not exist |
 | 4 | vault is uninitialized, the key file is missing/loose-permissioned/malformed, the key does not open the vault, or the vault still uses a passphrase and needs `migrate` |
+| 5 | another rsnug process holds the vault lock and the wait timed out (retry) |
+
+### Concurrent writes are serialized
+
+Every command that changes the vault — `set`, `unset`, `init`, `migrate` — holds an exclusive lock across its whole read-modify-write, so two rsnug processes cannot interleave. Without it, a `set` and an `unset` started at the same time both exit 0 and one of the two changes is silently lost: whichever saves last writes a snapshot it read before the other one landed, resurrecting a deleted key or dropping a written one.
+
+The lock is an empty sidecar file next to the vault, `<vault>.lock`, held with `flock(2)` (`LockFileEx` on Windows). The kernel releases it when the process exits, so a crashed or killed rsnug never strands the vault and there is no stale lock to clear by hand. The file itself is never deleted — unlinking it would let the next process lock a different inode — so `vault.age.lock` stays beside `vault.age` for good. It holds nothing; removing it while no rsnug is running is harmless.
+
+A command that cannot take the lock retries for 5 seconds and then exits 5 instead of hanging. A vault write takes milliseconds, so exhausting that wait means an unusual pile-up of writers, and exit 5 is always worth retrying.
+
+`get` and `list` take no lock. They never block behind a writer and never fail with exit 5. A write is published by renaming a finished file over the old one, so a reader always sees one whole vault, never a half-written one.
+
+The guarantee is per command, not per caller. An agent that reads with `get` and then writes with `set` still has a gap between the two calls, and rsnug cannot close it; if two agents update the same key, coordinate them above rsnug.
 
 ### Deletion is permanent
 
