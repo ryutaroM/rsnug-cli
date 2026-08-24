@@ -1134,3 +1134,98 @@ fn reads_do_not_wait_for_a_writer() {
         "a reader must not queue behind a writer, took {elapsed:?}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn a_restrictive_umask_does_not_wedge_the_lock_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("vault.age");
+    let key = dir.path().join("key");
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "umask 0277; exec '{}' --vault '{}' --key-file '{}' init",
+            env!("CARGO_BIN_EXE_rsnug"),
+            vault.display(),
+            key.display()
+        ))
+        .stdin(Stdio::null())
+        .env_remove("RSNUG_PASSPHRASE")
+        .env_remove("RSNUG_KEY_FILE")
+        .output()
+        .expect("failed to run rsnug");
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+
+    let written = run_with_vault(&["set", "KEY", "VALUE"], &vault, &key);
+
+    assert_eq!(
+        code(&written),
+        0,
+        "a lock file created under a tight umask must not lock the owner out: {}",
+        stderr(&written)
+    );
+}
+
+#[test]
+fn a_command_that_finds_no_vault_leaves_nothing_behind() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let key = dir.path().join("key");
+    write_key(&key);
+
+    for (n, args) in [
+        vec!["set", "KEY", "VALUE"],
+        vec!["unset", "KEY"],
+        vec!["migrate"],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let root = dir.path().join(format!("root{n}"));
+        let vault = root.join("nested").join("vault.age");
+        let output = scoped(&args, &vault, &key)
+            .env("RSNUG_PASSPHRASE", "pw")
+            .stdin(Stdio::null())
+            .output()
+            .expect("failed to run rsnug");
+
+        assert_eq!(code(&output), 4, "{args:?}: {}", stderr(&output));
+        assert!(
+            !root.exists(),
+            "{args:?} found no vault, so it must not leave a directory or a lock file behind"
+        );
+    }
+}
+
+#[test]
+fn concurrent_inits_share_one_key_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let key = dir.path().join("key");
+    let first = dir.path().join("first.age");
+    let second = dir.path().join("second.age");
+
+    let children = vec![
+        spawn(&mut scoped(&["init"], &first, &key)),
+        spawn(&mut scoped(&["init"], &second, &key)),
+    ];
+    let outputs: Vec<Output> = children
+        .into_iter()
+        .map(|child| child.wait_with_output().expect("failed to wait for rsnug"))
+        .collect();
+
+    for output in &outputs {
+        assert_eq!(
+            code(output),
+            0,
+            "an init that lost the race for the key file must reuse it: {}",
+            stderr(output)
+        );
+    }
+    assert_eq!(
+        code(&run_with_vault(&["set", "KEY", "VALUE"], &first, &key)),
+        0
+    );
+    assert_eq!(
+        code(&run_with_vault(&["set", "KEY", "VALUE"], &second, &key)),
+        0
+    );
+}

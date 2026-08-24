@@ -21,6 +21,15 @@ pub enum GetOutcome {
     Revealed { key: String, value: SecretString },
 }
 
+fn require_vault(path: &Path) -> Result<(), RsnugError> {
+    match std::fs::metadata(path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            Err(RsnugError::VaultNotFound(path.to_path_buf()))
+        }
+        _ => Ok(()),
+    }
+}
+
 pub fn init(
     path: &Path,
     key_file: &Path,
@@ -38,11 +47,7 @@ pub fn init(
         }
         recipient_for(key_file, new_key, identities)?
     } else {
-        match key::load(key_file) {
-            Ok(identities) => recipient_for(key_file, new_key, identities)?,
-            Err(RsnugError::KeyFileNotFound(_)) => key::generate(key_file)?.to_public(),
-            Err(err) => return Err(err),
-        }
+        recipient_from_key_file(key_file, new_key)?
     };
 
     vault::save(path, &VaultData::empty(), &recipient)?;
@@ -50,6 +55,23 @@ pub fn init(
         path: path.to_path_buf(),
         key_file: key_file.to_path_buf(),
     })
+}
+
+fn recipient_from_key_file(
+    key_file: &Path,
+    new_key: bool,
+) -> Result<age::x25519::Recipient, RsnugError> {
+    match key::load(key_file) {
+        Ok(identities) => recipient_for(key_file, new_key, identities),
+        Err(RsnugError::KeyFileNotFound(_)) => match key::generate(key_file) {
+            Ok(identity) => Ok(identity.to_public()),
+            Err(RsnugError::KeyFileAlreadyExists(_)) => {
+                recipient_for(key_file, new_key, key::load(key_file)?)
+            }
+            Err(err) => Err(err),
+        },
+        Err(err) => Err(err),
+    }
 }
 
 fn recipient_for(
@@ -71,6 +93,7 @@ pub fn migrate(
     key_file: &Path,
     passphrase: &SecretString,
 ) -> Result<MigrateOutcome, RsnugError> {
+    require_vault(path)?;
     let _lock = lock::acquire(path)?;
     if !vault::is_legacy(path)? {
         return Err(RsnugError::VaultAlreadyMigrated(path.to_path_buf()));
@@ -83,11 +106,7 @@ pub fn migrate(
         return Err(RsnugError::BackupAlreadyExists(backup));
     }
 
-    let recipient = match key::load(key_file) {
-        Ok(identities) => recipient_for(key_file, false, identities)?,
-        Err(RsnugError::KeyFileNotFound(_)) => key::generate(key_file)?.to_public(),
-        Err(err) => return Err(err),
-    };
+    let recipient = recipient_from_key_file(key_file, false)?;
 
     std::fs::copy(path, &backup)?;
     vault::save(path, &data, &recipient)?;
@@ -111,6 +130,7 @@ pub fn set(
     key: String,
     value: SecretString,
 ) -> Result<(), RsnugError> {
+    require_vault(path)?;
     let _lock = lock::acquire(path)?;
     let (mut data, recipient) = vault::load(path, identities)?;
     data.insert(key, value.expose_secret().to_owned());
@@ -145,6 +165,7 @@ pub fn unset(
     identities: &[age::x25519::Identity],
     key: &str,
 ) -> Result<(), RsnugError> {
+    require_vault(path)?;
     let _lock = lock::acquire(path)?;
     let (mut data, recipient) = vault::load(path, identities)?;
     if data.remove(key).is_none() {

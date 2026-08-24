@@ -22,7 +22,7 @@ pub fn acquire(vault: &Path) -> Result<VaultLock, RsnugError> {
 fn acquire_within(vault: &Path, wait: Duration) -> Result<VaultLock, RsnugError> {
     let path = lock_path(vault);
     fsutil::prepare_parent(&path)?;
-    let file = fsutil::private_options().create(true).open(&path)?;
+    let file = open_lock_file(&path)?;
 
     let deadline = Instant::now() + wait;
     loop {
@@ -36,6 +36,15 @@ fn acquire_within(vault: &Path, wait: Duration) -> Result<VaultLock, RsnugError>
         }
         std::thread::sleep(RETRY);
     }
+}
+
+fn open_lock_file(path: &Path) -> Result<File, RsnugError> {
+    match fsutil::private_options().create_new(true).open(path) {
+        Ok(_) => fsutil::set_private_permissions(path, 0o600)?,
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(err) => return Err(RsnugError::Io(err)),
+    }
+    Ok(File::open(path)?)
 }
 
 fn lock_path(vault: &Path) -> PathBuf {
