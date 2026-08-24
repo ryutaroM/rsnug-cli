@@ -1,5 +1,6 @@
 use crate::error::RsnugError;
 use crate::key;
+use crate::lock;
 use crate::vault::{self, VaultData};
 use age::secrecy::{ExposeSecret, SecretString};
 use std::path::Path;
@@ -26,6 +27,7 @@ pub fn init(
     force: bool,
     new_key: bool,
 ) -> Result<InitOutcome, RsnugError> {
+    let _lock = lock::acquire(path)?;
     let recipient = if path.exists() {
         if !force {
             return Err(RsnugError::VaultAlreadyExists(path.to_path_buf()));
@@ -69,6 +71,7 @@ pub fn migrate(
     key_file: &Path,
     passphrase: &SecretString,
 ) -> Result<MigrateOutcome, RsnugError> {
+    let _lock = lock::acquire(path)?;
     if !vault::is_legacy(path)? {
         return Err(RsnugError::VaultAlreadyMigrated(path.to_path_buf()));
     }
@@ -108,6 +111,7 @@ pub fn set(
     key: String,
     value: SecretString,
 ) -> Result<(), RsnugError> {
+    let _lock = lock::acquire(path)?;
     let (mut data, recipient) = vault::load(path, identities)?;
     data.insert(key, value.expose_secret().to_owned());
     vault::save(path, &data, &recipient)
@@ -141,6 +145,7 @@ pub fn unset(
     identities: &[age::x25519::Identity],
     key: &str,
 ) -> Result<(), RsnugError> {
+    let _lock = lock::acquire(path)?;
     let (mut data, recipient) = vault::load(path, identities)?;
     if data.remove(key).is_none() {
         return Err(RsnugError::KeyNotFound(key.to_owned()));

@@ -989,3 +989,148 @@ fn a_bare_relative_key_file_name_is_usable() {
     assert_eq!(code(&output), 0, "{}", stderr(&output));
     assert!(dir.path().join("mykey").exists());
 }
+
+fn spawn_concurrent_sets(vault: &Path, key: &Path, count: usize) -> Vec<Output> {
+    let children: Vec<_> = (0..count)
+        .map(|n| {
+            let name = format!("KEY{n}");
+            scoped(&["set", &name, "VALUE"], vault, key)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("failed to spawn rsnug")
+        })
+        .collect();
+    children
+        .into_iter()
+        .map(|child| child.wait_with_output().expect("failed to wait for rsnug"))
+        .collect()
+}
+
+#[test]
+fn concurrent_sets_do_not_lose_a_key() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("vault.age");
+    let key = dir.path().join("key");
+    init_vault(&vault, &key);
+
+    let outputs = spawn_concurrent_sets(&vault, &key, 8);
+
+    for output in &outputs {
+        assert_eq!(code(output), 0, "{}", stderr(output));
+    }
+    let listed: Vec<String> = run_ok(&["list"], &vault, &key)
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    let expected: Vec<String> = (0..8).map(|n| format!("KEY{n}")).collect();
+    assert_eq!(
+        listed, expected,
+        "every set reported success, so every key must be in the vault"
+    );
+}
+
+fn hold_lock(vault: &Path) -> std::fs::File {
+    let mut name = vault.as_os_str().to_owned();
+    name.push(".lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(std::path::PathBuf::from(name))
+        .expect("open lock file");
+    file.lock().expect("lock");
+    file
+}
+
+fn spawn(command: &mut Command) -> std::process::Child {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn rsnug")
+}
+
+#[test]
+fn a_writer_waits_for_the_lock_instead_of_racing_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("vault.age");
+    let key = dir.path().join("key");
+    init_vault(&vault, &key);
+    let held = hold_lock(&vault);
+
+    let child = spawn(&mut scoped(&["set", "KEY", "VALUE"], &vault, &key));
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    drop(held);
+    let output = child.wait_with_output().expect("failed to wait for rsnug");
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert_eq!(run_ok(&["get", "KEY", "--reveal"], &vault, &key), "VALUE\n");
+}
+
+#[test]
+fn every_mutating_command_refuses_a_locked_vault() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("vault.age");
+    let key = dir.path().join("key");
+    init_vault(&vault, &key);
+    assert_eq!(
+        code(&run_with_vault(&["set", "KEY", "VALUE"], &vault, &key)),
+        0
+    );
+    let legacy = dir.path().join("legacy.age");
+    let legacy_key = dir.path().join("legacy-key");
+    legacy_vault(&legacy, "pw", r#"{"KEY":"VALUE"}"#);
+
+    let held = hold_lock(&vault);
+    let held_legacy = hold_lock(&legacy);
+    let children = vec![
+        spawn(&mut scoped(&["set", "KEY", "OTHER"], &vault, &key)),
+        spawn(&mut scoped(&["unset", "KEY"], &vault, &key)),
+        spawn(&mut scoped(&["init", "--force"], &vault, &key)),
+        spawn(scoped(&["migrate"], &legacy, &legacy_key).env("RSNUG_PASSPHRASE", "pw")),
+    ];
+    let outputs: Vec<Output> = children
+        .into_iter()
+        .map(|child| child.wait_with_output().expect("failed to wait for rsnug"))
+        .collect();
+    drop(held);
+    drop(held_legacy);
+
+    for output in &outputs {
+        assert_eq!(code(output), 5, "{}", stderr(output));
+        assert_eq!(stdout(output), "");
+        assert!(stderr(output).contains("locked"), "{}", stderr(output));
+    }
+    assert_eq!(run_ok(&["get", "KEY", "--reveal"], &vault, &key), "VALUE\n");
+    assert!(
+        !legacy_key.exists(),
+        "a refused migrate must not write a key file"
+    );
+}
+
+#[test]
+fn reads_do_not_wait_for_a_writer() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("vault.age");
+    let key = dir.path().join("key");
+    init_vault(&vault, &key);
+    assert_eq!(
+        code(&run_with_vault(&["set", "KEY", "VALUE"], &vault, &key)),
+        0
+    );
+    let held = hold_lock(&vault);
+
+    let started = std::time::Instant::now();
+    assert_eq!(run_ok(&["list"], &vault, &key), "KEY\n");
+    assert_eq!(run_ok(&["get", "KEY", "--reveal"], &vault, &key), "VALUE\n");
+    let elapsed = started.elapsed();
+
+    drop(held);
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "a reader must not queue behind a writer, took {elapsed:?}"
+    );
+}

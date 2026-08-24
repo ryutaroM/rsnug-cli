@@ -16,6 +16,7 @@ pub enum RsnugError {
     VaultNotFound(PathBuf),
     VaultAlreadyExists(PathBuf),
     VaultNotOverwritable(PathBuf),
+    VaultLocked(PathBuf),
     DecryptionFailed,
     KeyNotFound(String),
     UnsupportedVaultVersion { found: u32, expected: u32 },
@@ -45,6 +46,7 @@ impl RsnugError {
             RsnugError::Io(_) => exit::GENERAL_ERROR,
             RsnugError::Serialization(_) => exit::GENERAL_ERROR,
             RsnugError::KeyNotFound(_) => exit::KEY_NOT_FOUND,
+            RsnugError::VaultLocked(_) => exit::VAULT_BUSY,
         }
     }
 }
@@ -122,6 +124,14 @@ impl fmt::Display for RsnugError {
                     f,
                     "refusing to overwrite {} because the key file does not open it (delete the file yourself to start over)",
                     path.display()
+                )
+            }
+            RsnugError::VaultLocked(path) => {
+                write!(
+                    f,
+                    "vault at {} is locked by another rsnug process (waited {}s; retry)",
+                    path.display(),
+                    crate::lock::WAIT.as_secs()
                 )
             }
             RsnugError::DecryptionFailed => {

@@ -54,7 +54,7 @@ fn temp_sibling(path: &Path) -> PathBuf {
 }
 
 #[cfg(unix)]
-fn private_options() -> std::fs::OpenOptions {
+pub fn private_options() -> std::fs::OpenOptions {
     use std::os::unix::fs::OpenOptionsExt;
     let mut options = std::fs::OpenOptions::new();
     options.write(true).mode(0o600);
@@ -62,7 +62,7 @@ fn private_options() -> std::fs::OpenOptions {
 }
 
 #[cfg(not(unix))]
-fn private_options() -> std::fs::OpenOptions {
+pub fn private_options() -> std::fs::OpenOptions {
     let mut options = std::fs::OpenOptions::new();
     options.write(true);
     options

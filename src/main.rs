@@ -4,6 +4,7 @@ mod error;
 mod exit;
 mod fsutil;
 mod key;
+mod lock;
 mod render;
 mod vault;
 
