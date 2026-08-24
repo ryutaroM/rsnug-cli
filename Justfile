@@ -7,7 +7,7 @@ build:
 test:
     cargo test
 
-# log_n 20 で暗号化する #[ignore] テスト。デバッグビルドでは数分かかる。
+# The #[ignore] test encrypts at log_n 20, which takes minutes in a debug build.
 test-ignored:
     cargo test --release -- --ignored
 
@@ -20,7 +20,7 @@ fmt-check:
 lint:
     cargo clippy --all-targets -- -D warnings
 
-# CI と同一の内容・同一の順序
+# The same checks in the same order as the CI workflow.
 ci: build test fmt-check lint
 
 build-release:
