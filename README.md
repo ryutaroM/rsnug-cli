@@ -184,7 +184,7 @@ Printing a plaintext value to stdout via an agent leaves that value in the LLM's
 
 ## Development
 
-Development commands live in the `justfile`. Install [just](https://github.com/casey/just) with `brew install just` (or `cargo install just --locked`), then:
+Development commands live in the `Justfile`. Install [just](https://github.com/casey/just) with `brew install just` (or `cargo install just --locked`), then:
 
 ```
 just
