@@ -197,16 +197,23 @@ Printing a plaintext value to stdout via an agent leaves that value in the LLM's
 
 ## Development
 
+Development commands live in the `Justfile`. Install [just](https://github.com/casey/just) with `brew install just` (or `cargo install just --locked`), then:
+
 ```
-cargo test
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
+just
+just ci
+just test
+just fmt
 ```
+
+`just` lists every recipe, and `just ci` runs the same checks in the same order as the CI workflow, so a green `just ci` locally means a green CI.
 
 One test is marked `ignore` because it encrypts and decrypts at scrypt work factor 20, which takes minutes in a debug build. It guards the migration path against a vault written on a machine much faster than the one reading it. Run it before touching `decrypt_legacy`:
 
 ```
-cargo test -- --ignored
+just test-ignored
 ```
 
-To run inside a container, use `docker compose run --rm dev <command>`.
+That recipe builds in release mode, where the test finishes in seconds rather than minutes.
+
+To run inside a container, use `just docker cargo test`.
