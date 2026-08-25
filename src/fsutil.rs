@@ -22,14 +22,43 @@ pub fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<(), RsnugError>
         let _ = std::fs::remove_file(&temp);
         return Err(RsnugError::Io(err));
     }
-    Ok(())
+    sync_parent(path)
 }
 
 pub fn create_private_atomic(path: &Path, bytes: &[u8]) -> Result<(), RsnugError> {
     let temp = write_temp_private(path, bytes)?;
     let linked = std::fs::hard_link(&temp, path);
     let _ = std::fs::remove_file(&temp);
-    linked.map_err(RsnugError::Io)
+    linked.map_err(RsnugError::Io)?;
+    sync_parent(path)
+}
+
+// A renamed file is only durable once the directory entry itself reaches disk.
+#[cfg(unix)]
+pub fn sync_parent(path: &Path) -> Result<(), RsnugError> {
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    match std::fs::File::open(parent)?.sync_all() {
+        Err(err) if !flush_unsupported(&err) => Err(RsnugError::Io(err)),
+        _ => Ok(()),
+    }
+}
+
+// A filesystem that cannot flush a directory still renamed the file; failing
+// here would report a write that landed as a write that did not.
+#[cfg(unix)]
+fn flush_unsupported(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::Unsupported | std::io::ErrorKind::InvalidInput
+    )
+}
+
+#[cfg(not(unix))]
+pub fn sync_parent(_path: &Path) -> Result<(), RsnugError> {
+    Ok(())
 }
 
 fn write_temp_private(path: &Path, bytes: &[u8]) -> Result<PathBuf, RsnugError> {
@@ -192,6 +221,42 @@ mod tests {
             .map(|entry| entry.expect("entry").path())
             .collect();
         assert_eq!(entries, vec![path]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_filesystem_without_a_flush_is_not_a_failed_write() {
+        use std::io::{Error, ErrorKind};
+
+        assert!(flush_unsupported(&Error::from(ErrorKind::Unsupported)));
+        assert!(flush_unsupported(&Error::from(ErrorKind::InvalidInput)));
+        assert!(!flush_unsupported(&Error::from(
+            ErrorKind::PermissionDenied
+        )));
+        assert!(!flush_unsupported(&Error::from(ErrorKind::OutOfMemory)));
+    }
+
+    #[test]
+    fn sync_parent_flushes_the_directory_that_holds_the_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("secret");
+        std::fs::write(&path, b"payload").expect("write");
+
+        sync_parent(&path).expect("sync");
+    }
+
+    #[test]
+    fn sync_parent_accepts_a_bare_relative_name() {
+        assert!(sync_parent(Path::new("mykey")).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_parent_reports_a_parent_that_is_gone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("missing").join("secret");
+
+        assert!(sync_parent(&missing).is_err());
     }
 
     #[cfg(unix)]
