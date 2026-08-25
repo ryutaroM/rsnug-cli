@@ -1,4 +1,5 @@
 use crate::error::RsnugError;
+use crate::fsutil;
 use crate::key;
 use crate::lock;
 use crate::vault::{self, VaultData};
@@ -36,6 +37,7 @@ pub fn init(
     force: bool,
     new_key: bool,
 ) -> Result<InitOutcome, RsnugError> {
+    let path = &fsutil::resolve(path)?;
     let _lock = lock::acquire(path)?;
     let recipient = if path.exists() {
         if !force {
@@ -93,6 +95,7 @@ pub fn migrate(
     key_file: &Path,
     passphrase: &SecretString,
 ) -> Result<MigrateOutcome, RsnugError> {
+    let path = &fsutil::resolve(path)?;
     require_vault(path)?;
     let _lock = lock::acquire(path)?;
     if !vault::is_legacy(path)? {
@@ -130,6 +133,7 @@ pub fn set(
     key: String,
     value: SecretString,
 ) -> Result<(), RsnugError> {
+    let path = &fsutil::resolve(path)?;
     require_vault(path)?;
     let _lock = lock::acquire(path)?;
     let (mut data, recipient) = vault::load(path, identities)?;
@@ -143,6 +147,7 @@ pub fn get(
     key: &str,
     reveal: bool,
 ) -> Result<GetOutcome, RsnugError> {
+    let path = &fsutil::resolve(path)?;
     let (data, _) = vault::load(path, identities)?;
     let value = data
         .get(key)
@@ -165,6 +170,7 @@ pub fn unset(
     identities: &[age::x25519::Identity],
     key: &str,
 ) -> Result<(), RsnugError> {
+    let path = &fsutil::resolve(path)?;
     require_vault(path)?;
     let _lock = lock::acquire(path)?;
     let (mut data, recipient) = vault::load(path, identities)?;
@@ -175,6 +181,7 @@ pub fn unset(
 }
 
 pub fn list(path: &Path, identities: &[age::x25519::Identity]) -> Result<Vec<String>, RsnugError> {
+    let path = &fsutil::resolve(path)?;
     let (data, _) = vault::load(path, identities)?;
     Ok(data.keys().map(str::to_owned).collect())
 }
