@@ -22,13 +22,10 @@ pub enum GetOutcome {
 }
 
 fn require_vault(path: &Path) -> Result<(), RsnugError> {
-    match std::fs::metadata(path) {
-        Ok(metadata) if metadata.is_file() => Ok(()),
-        Ok(_) => Err(RsnugError::VaultNotAFile(path.to_path_buf())),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            Err(RsnugError::VaultNotFound(path.to_path_buf()))
-        }
-        Err(err) => Err(RsnugError::Io(err)),
+    if vault::exists(path)? {
+        Ok(())
+    } else {
+        Err(RsnugError::VaultNotFound(path.to_path_buf()))
     }
 }
 
@@ -38,8 +35,9 @@ pub fn init(
     force: bool,
     new_key: bool,
 ) -> Result<InitOutcome, RsnugError> {
+    let existed = vault::exists(path)?;
     let _lock = lock::acquire(path)?;
-    let recipient = if path.exists() {
+    let recipient = if existed || vault::exists(path)? {
         if !force {
             return Err(RsnugError::VaultAlreadyExists(path.to_path_buf()));
         }
@@ -184,6 +182,14 @@ pub fn list(path: &Path, identities: &[age::x25519::Identity]) -> Result<Vec<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::exit;
+
+    fn assert_vault_unavailable(err: RsnugError, path: &Path, needle: &str) {
+        assert_eq!(err.exit_code(), exit::VAULT_UNAVAILABLE, "{err}");
+        let message = err.to_string();
+        assert!(message.contains(needle), "{message}");
+        assert!(message.contains(&path.display().to_string()), "{message}");
+    }
 
     #[test]
     fn a_missing_vault_is_reported_as_not_found() {
@@ -191,7 +197,9 @@ mod tests {
         let vault = dir.path().join("vault.age");
 
         match require_vault(&vault) {
-            Err(RsnugError::VaultNotFound(reported)) => assert_eq!(reported, vault),
+            Err(err @ RsnugError::VaultNotFound(_)) => {
+                assert_vault_unavailable(err, &vault, "vault not found")
+            }
             other => panic!("expected VaultNotFound, got {other:?}"),
         }
     }
@@ -212,14 +220,31 @@ mod tests {
         std::fs::create_dir(&vault).expect("create dir");
 
         match require_vault(&vault) {
-            Err(RsnugError::VaultNotAFile(reported)) => assert_eq!(reported, vault),
+            Err(err @ RsnugError::VaultNotAFile(_)) => {
+                assert_vault_unavailable(err, &vault, "is not a file")
+            }
             other => panic!("expected VaultNotAFile, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_vault_path_no_user_can_inspect_is_reported_as_unreadable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("not-a-directory");
+        std::fs::write(&file, b"payload").expect("write");
+        let vault = file.join("vault.age");
+
+        match require_vault(&vault) {
+            Err(err @ RsnugError::VaultUnreadable(_, _)) => {
+                assert_vault_unavailable(err, &vault, "cannot be read")
+            }
+            other => panic!("expected VaultUnreadable, got {other:?}"),
         }
     }
 
     #[cfg(unix)]
     #[test]
-    fn a_vault_rsnug_cannot_look_at_is_reported_as_an_io_error() {
+    fn a_vault_behind_a_directory_rsnug_cannot_enter_is_reported_as_unreadable() {
         let dir = tempfile::tempdir().expect("tempdir");
         let blocked = dir.path().join("blocked");
         std::fs::create_dir(&blocked).expect("create dir");
@@ -227,21 +252,25 @@ mod tests {
         std::fs::write(&vault, b"ciphertext").expect("write");
         crate::fsutil::set_private_permissions(&blocked, 0o000).expect("chmod");
 
-        let result = require_vault(&vault);
         let denied = matches!(
             std::fs::metadata(&vault),
             Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied
         );
+        let result = require_vault(&vault);
         crate::fsutil::set_private_permissions(&blocked, 0o700).expect("chmod");
 
         if !denied {
+            eprintln!(
+                "SKIP: this user traverses a mode-000 directory (root?); \
+                 a_vault_path_no_user_can_inspect_is_reported_as_unreadable covers the contract"
+            );
             return;
         }
         match result {
-            Err(RsnugError::Io(err)) => {
-                assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+            Err(err @ RsnugError::VaultUnreadable(_, _)) => {
+                assert_vault_unavailable(err, &vault, "cannot be read")
             }
-            other => panic!("expected Io, got {other:?}"),
+            other => panic!("expected VaultUnreadable, got {other:?}"),
         }
     }
 }
