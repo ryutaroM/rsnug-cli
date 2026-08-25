@@ -23,10 +23,12 @@ pub enum GetOutcome {
 
 fn require_vault(path: &Path) -> Result<(), RsnugError> {
     match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => Ok(()),
+        Ok(_) => Err(RsnugError::VaultNotAFile(path.to_path_buf())),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             Err(RsnugError::VaultNotFound(path.to_path_buf()))
         }
-        _ => Ok(()),
+        Err(err) => Err(RsnugError::Io(err)),
     }
 }
 
@@ -177,4 +179,69 @@ pub fn unset(
 pub fn list(path: &Path, identities: &[age::x25519::Identity]) -> Result<Vec<String>, RsnugError> {
     let (data, _) = vault::load(path, identities)?;
     Ok(data.keys().map(str::to_owned).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_vault_is_reported_as_not_found() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = dir.path().join("vault.age");
+
+        match require_vault(&vault) {
+            Err(RsnugError::VaultNotFound(reported)) => assert_eq!(reported, vault),
+            other => panic!("expected VaultNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_existing_vault_file_is_accepted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = dir.path().join("vault.age");
+        std::fs::write(&vault, b"ciphertext").expect("write");
+
+        require_vault(&vault).expect("an existing vault file is a vault");
+    }
+
+    #[test]
+    fn a_directory_is_not_a_vault() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = dir.path().join("vault.age");
+        std::fs::create_dir(&vault).expect("create dir");
+
+        match require_vault(&vault) {
+            Err(RsnugError::VaultNotAFile(reported)) => assert_eq!(reported, vault),
+            other => panic!("expected VaultNotAFile, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_vault_rsnug_cannot_look_at_is_reported_as_an_io_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let blocked = dir.path().join("blocked");
+        std::fs::create_dir(&blocked).expect("create dir");
+        let vault = blocked.join("vault.age");
+        std::fs::write(&vault, b"ciphertext").expect("write");
+        crate::fsutil::set_private_permissions(&blocked, 0o000).expect("chmod");
+
+        let result = require_vault(&vault);
+        let denied = matches!(
+            std::fs::metadata(&vault),
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied
+        );
+        crate::fsutil::set_private_permissions(&blocked, 0o700).expect("chmod");
+
+        if !denied {
+            return;
+        }
+        match result {
+            Err(RsnugError::Io(err)) => {
+                assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+            }
+            other => panic!("expected Io, got {other:?}"),
+        }
+    }
 }

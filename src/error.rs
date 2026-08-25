@@ -16,6 +16,7 @@ pub enum RsnugError {
     VaultNotFound(PathBuf),
     VaultAlreadyExists(PathBuf),
     VaultNotOverwritable(PathBuf),
+    VaultNotAFile(PathBuf),
     VaultLocked(PathBuf),
     DecryptionFailed,
     KeyNotFound(String),
@@ -36,6 +37,7 @@ impl RsnugError {
             RsnugError::ExcessiveWork { .. } => exit::VAULT_UNAVAILABLE,
             RsnugError::VaultNotFound(_) => exit::VAULT_UNAVAILABLE,
             RsnugError::VaultNotOverwritable(_) => exit::VAULT_UNAVAILABLE,
+            RsnugError::VaultNotAFile(_) => exit::VAULT_UNAVAILABLE,
             RsnugError::DecryptionFailed => exit::VAULT_UNAVAILABLE,
             RsnugError::KeyFileAlreadyExists(_) => exit::GENERAL_ERROR,
             RsnugError::VaultAlreadyMigrated(_) => exit::GENERAL_ERROR,
@@ -125,6 +127,9 @@ impl fmt::Display for RsnugError {
                     "refusing to overwrite {} because the key file does not open it (delete the file yourself to start over)",
                     path.display()
                 )
+            }
+            RsnugError::VaultNotAFile(path) => {
+                write!(f, "vault at {} is not a file", path.display())
             }
             RsnugError::VaultLocked(path) => {
                 write!(

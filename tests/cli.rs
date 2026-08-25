@@ -425,6 +425,25 @@ fn set_on_missing_vault_fails_with_vault_unavailable() {
 }
 
 #[test]
+fn set_on_a_vault_that_is_a_directory_fails_with_vault_unavailable() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("vault.age");
+    let key = dir.path().join("key");
+    write_key(&key);
+    std::fs::create_dir(&vault).expect("create dir");
+
+    let output = run_with_vault(&["set", "KEY", "VALUE"], &vault, &key);
+
+    assert_eq!(code(&output), 4);
+    assert_eq!(stdout(&output), "");
+    assert!(
+        stderr(&output).contains("is not a file"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
 fn set_succeeds_after_init() {
     let dir = tempfile::tempdir().expect("tempdir");
     let vault = dir.path().join("vault.age");
