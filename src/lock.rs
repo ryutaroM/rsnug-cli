@@ -20,9 +20,8 @@ pub fn acquire(vault: &Path) -> Result<VaultLock, RsnugError> {
 }
 
 fn acquire_within(vault: &Path, wait: Duration) -> Result<VaultLock, RsnugError> {
-    let path = lock_path(vault);
-    fsutil::prepare_parent(&path)?;
-    let file = open_lock_file(&path)?;
+    fsutil::prepare_parent(vault)?;
+    let file = open_lock_file(&lock_path(vault))?;
 
     let deadline = Instant::now() + wait;
     loop {
@@ -48,9 +47,28 @@ fn open_lock_file(path: &Path) -> Result<File, RsnugError> {
 }
 
 fn lock_path(vault: &Path) -> PathBuf {
-    let mut name = vault.as_os_str().to_owned();
+    let mut name = resolve(vault).into_os_string();
     name.push(".lock");
     PathBuf::from(name)
+}
+
+// Two names for one vault must land on one lock file. A vault that does not
+// exist yet is resolved through its directory instead.
+fn resolve(vault: &Path) -> PathBuf {
+    if let Ok(resolved) = vault.canonicalize() {
+        return resolved;
+    }
+    let Some(name) = vault.file_name() else {
+        return vault.to_path_buf();
+    };
+    let parent = match vault.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    parent
+        .canonicalize()
+        .map(|parent| parent.join(name))
+        .unwrap_or_else(|_| vault.to_path_buf())
 }
 
 #[cfg(test)]
@@ -122,8 +140,62 @@ mod tests {
 
     #[test]
     fn the_lock_file_does_not_take_the_place_of_the_vault() {
-        let vault = Path::new("/tmp/rsnug/vault.age");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = dir.path().join("vault.age");
 
-        assert_eq!(lock_path(vault), Path::new("/tmp/rsnug/vault.age.lock"));
+        let expected = dir
+            .path()
+            .canonicalize()
+            .expect("canonicalize")
+            .join("vault.age.lock");
+        assert_eq!(lock_path(&vault), expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_to_the_vault_takes_the_same_lock_as_the_vault() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = dir.path().join("vault.age");
+        std::fs::write(&vault, b"vault").expect("write");
+        let link = dir.path().join("link.age");
+        std::os::unix::fs::symlink(&vault, &link).expect("symlink");
+
+        let _guard = acquire_within(&vault, BRIEF).expect("acquire");
+
+        assert!(
+            matches!(
+                acquire_within(&link, BRIEF),
+                Err(RsnugError::VaultLocked(_))
+            ),
+            "two names for one vault must contend for one lock"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_directory_takes_the_same_lock_as_the_real_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).expect("create dir");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        assert_eq!(
+            lock_path(&link.join("vault.age")),
+            lock_path(&real.join("vault.age")),
+            "an uninitialized vault is named by its directory, which init must resolve too"
+        );
+    }
+
+    #[test]
+    fn a_bare_name_takes_the_same_lock_as_its_full_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cwd = std::env::current_dir().expect("cwd");
+
+        std::env::set_current_dir(dir.path()).expect("chdir");
+        let bare = lock_path(Path::new("vault.age"));
+        std::env::set_current_dir(&cwd).expect("chdir back");
+
+        assert_eq!(bare, lock_path(&dir.path().join("vault.age")));
     }
 }
