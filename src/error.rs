@@ -17,6 +17,7 @@ pub enum RsnugError {
     VaultAlreadyExists(PathBuf),
     VaultNotOverwritable(PathBuf),
     VaultLocked(PathBuf),
+    LockFileUnopenable(PathBuf, std::io::Error),
     DecryptionFailed,
     KeyNotFound(String),
     UnsupportedVaultVersion { found: u32, expected: u32 },
@@ -36,6 +37,7 @@ impl RsnugError {
             RsnugError::ExcessiveWork { .. } => exit::VAULT_UNAVAILABLE,
             RsnugError::VaultNotFound(_) => exit::VAULT_UNAVAILABLE,
             RsnugError::VaultNotOverwritable(_) => exit::VAULT_UNAVAILABLE,
+            RsnugError::LockFileUnopenable(_, _) => exit::VAULT_UNAVAILABLE,
             RsnugError::DecryptionFailed => exit::VAULT_UNAVAILABLE,
             RsnugError::KeyFileAlreadyExists(_) => exit::GENERAL_ERROR,
             RsnugError::VaultAlreadyMigrated(_) => exit::GENERAL_ERROR,
@@ -132,6 +134,13 @@ impl fmt::Display for RsnugError {
                     "vault at {} is locked by another rsnug process (waited {}s; retry)",
                     path.display(),
                     crate::lock::WAIT.as_secs()
+                )
+            }
+            RsnugError::LockFileUnopenable(path, err) => {
+                write!(
+                    f,
+                    "lock file {} cannot be opened: {err} (fix its owner and mode, or remove it)",
+                    path.display()
                 )
             }
             RsnugError::DecryptionFailed => {

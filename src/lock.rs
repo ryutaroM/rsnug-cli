@@ -44,7 +44,7 @@ fn open_lock_file(path: &Path) -> Result<File, RsnugError> {
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(err) => return Err(RsnugError::Io(err)),
     }
-    Ok(File::open(path)?)
+    File::open(path).map_err(|err| RsnugError::LockFileUnopenable(path.to_path_buf(), err))
 }
 
 fn lock_path(vault: &Path) -> PathBuf {
@@ -118,6 +118,30 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_lock_file_that_will_not_open_names_itself() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = dir.path().join("vault.age");
+        let path = lock_path(&vault);
+        std::fs::write(&path, b"").expect("write lock file");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        if File::open(&path).is_ok() {
+            return;
+        }
+
+        let Err(err) = acquire_within(&vault, BRIEF) else {
+            panic!("a lock file rsnug cannot open must not yield a lock");
+        };
+
+        assert!(
+            matches!(&err, RsnugError::LockFileUnopenable(reported, _) if reported == &path),
+            "the error must name the lock file, got {err:?}"
+        );
+        assert!(err.to_string().contains("vault.age.lock"), "{err}");
     }
 
     #[test]
