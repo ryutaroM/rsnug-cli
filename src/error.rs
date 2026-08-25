@@ -137,11 +137,14 @@ impl fmt::Display for RsnugError {
                 )
             }
             RsnugError::LockFileUnopenable(path, err) => {
-                write!(
-                    f,
-                    "lock file {} cannot be opened: {err} (fix its owner and mode, or remove it)",
-                    path.display()
-                )
+                write!(f, "lock file {} cannot be opened: {err}", path.display())?;
+                if err.kind() == std::io::ErrorKind::PermissionDenied {
+                    write!(
+                        f,
+                        " (fix its owner and mode, or remove it once no rsnug is running)"
+                    )?;
+                }
+                Ok(())
             }
             RsnugError::DecryptionFailed => {
                 write!(f, "failed to decrypt vault (wrong key or corrupt file)")

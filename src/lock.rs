@@ -39,12 +39,13 @@ fn acquire_within(vault: &Path, wait: Duration) -> Result<VaultLock, RsnugError>
 }
 
 fn open_lock_file(path: &Path) -> Result<File, RsnugError> {
+    let unopenable = |err| RsnugError::LockFileUnopenable(path.to_path_buf(), err);
     match fsutil::private_options().create_new(true).open(path) {
         Ok(_) => fsutil::set_private_permissions(path, 0o600)?,
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(err) => return Err(RsnugError::Io(err)),
+        Err(err) => return Err(unopenable(err)),
     }
-    File::open(path).map_err(|err| RsnugError::LockFileUnopenable(path.to_path_buf(), err))
+    File::open(path).map_err(unopenable)
 }
 
 fn lock_path(vault: &Path) -> PathBuf {
@@ -129,7 +130,7 @@ mod tests {
         let path = lock_path(&vault);
         std::fs::write(&path, b"").expect("write lock file");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).expect("chmod");
-        if File::open(&path).is_ok() {
+        if opens_anything(&path) {
             return;
         }
 
@@ -142,6 +143,85 @@ mod tests {
             "the error must name the lock file, got {err:?}"
         );
         assert!(err.to_string().contains("vault.age.lock"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_lock_path_that_leads_nowhere_names_itself() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = dir.path().join("vault.age");
+        let path = lock_path(&vault);
+        std::os::unix::fs::symlink(dir.path().join("gone"), &path).expect("symlink");
+
+        let Err(err) = acquire_within(&vault, BRIEF) else {
+            panic!("a lock file rsnug cannot open must not yield a lock");
+        };
+
+        assert!(
+            matches!(&err, RsnugError::LockFileUnopenable(reported, _) if reported == &path),
+            "the error must name the lock file, got {err:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_lock_file_that_cannot_be_created_names_itself() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let blocked = dir.path().join("not-a-directory");
+        std::fs::write(&blocked, b"").expect("write");
+        let vault = blocked.join("vault.age");
+
+        let Err(err) = acquire_within(&vault, BRIEF) else {
+            panic!("a lock file rsnug cannot create must not yield a lock");
+        };
+
+        assert!(
+            matches!(&err, RsnugError::LockFileUnopenable(reported, _) if reported == &lock_path(&vault)),
+            "the error must name the lock file, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn the_advice_to_remove_the_lock_file_waits_for_the_holder_to_leave() {
+        let err = RsnugError::LockFileUnopenable(
+            PathBuf::from("/srv/secrets/vault.age.lock"),
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        );
+
+        let message = err.to_string();
+
+        assert!(
+            message.contains("once no rsnug is running"),
+            "removing a lock another process holds costs a write: {message}"
+        );
+    }
+
+    #[test]
+    fn a_failure_that_is_not_about_permissions_blames_no_one() {
+        let err = RsnugError::LockFileUnopenable(
+            PathBuf::from("/srv/secrets/vault.age.lock"),
+            std::io::Error::from(std::io::ErrorKind::OutOfMemory),
+        );
+
+        let message = err.to_string();
+
+        assert!(message.contains("/srv/secrets/vault.age.lock"), "{message}");
+        assert!(
+            !message.contains("owner") && !message.contains("remove"),
+            "a transient failure is not fixed by a chown or an rm: {message}"
+        );
+    }
+
+    #[cfg(unix)]
+    fn opens_anything(path: &Path) -> bool {
+        if File::open(path).is_ok() {
+            eprintln!(
+                "skipped: this process opens {} at mode 000, so it cannot exercise a locked-out owner",
+                path.display()
+            );
+            return true;
+        }
+        false
     }
 
     #[test]
