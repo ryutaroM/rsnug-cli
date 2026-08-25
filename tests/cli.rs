@@ -1196,6 +1196,43 @@ fn a_command_that_finds_no_vault_leaves_nothing_behind() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn an_init_rsnug_refuses_leaves_nothing_behind() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let key = dir.path().join("key");
+    write_key(&key);
+    set_key_mode(&key, 0o644);
+    let root = dir.path().join("root");
+    let vault = root.join("nested").join("vault.age");
+
+    let output = run_with_vault(&["init"], &vault, &key);
+
+    assert_eq!(code(&output), 4, "{}", stderr(&output));
+    assert!(
+        !root.exists(),
+        "an init rsnug refused must not leave a directory or a lock file behind"
+    );
+}
+
+#[test]
+fn an_init_with_an_unreadable_key_file_creates_no_directory() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let key = dir.path().join("key");
+    std::fs::write(&key, "not an age identity\n").expect("write key");
+    set_key_mode(&key, 0o600);
+    let root = dir.path().join("root");
+    let vault = root.join("nested").join("vault.age");
+
+    let output = run_with_vault(&["init"], &vault, &key);
+
+    assert_eq!(code(&output), 4, "{}", stderr(&output));
+    assert!(
+        !root.exists(),
+        "a key file rsnug cannot read must stop init before it creates anything"
+    );
+}
+
 #[test]
 fn concurrent_inits_share_one_key_file() {
     let dir = tempfile::tempdir().expect("tempdir");

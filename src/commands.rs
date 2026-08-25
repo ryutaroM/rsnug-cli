@@ -30,24 +30,38 @@ fn require_vault(path: &Path) -> Result<(), RsnugError> {
     }
 }
 
+fn check_target(
+    path: &Path,
+    key_file: &Path,
+    force: bool,
+) -> Result<Option<Vec<age::x25519::Identity>>, RsnugError> {
+    if !path.exists() {
+        return match key::load(key_file) {
+            Ok(_) | Err(RsnugError::KeyFileNotFound(_)) => Ok(None),
+            Err(err) => Err(err),
+        };
+    }
+    if !force {
+        return Err(RsnugError::VaultAlreadyExists(path.to_path_buf()));
+    }
+    let identities = key::load(key_file)?;
+    if !vault::is_decryptable(path, &identities)? {
+        return Err(RsnugError::VaultNotOverwritable(path.to_path_buf()));
+    }
+    Ok(Some(identities))
+}
+
 pub fn init(
     path: &Path,
     key_file: &Path,
     force: bool,
     new_key: bool,
 ) -> Result<InitOutcome, RsnugError> {
+    check_target(path, key_file, force)?;
     let _lock = lock::acquire(path)?;
-    let recipient = if path.exists() {
-        if !force {
-            return Err(RsnugError::VaultAlreadyExists(path.to_path_buf()));
-        }
-        let identities = key::load(key_file)?;
-        if !vault::is_decryptable(path, &identities)? {
-            return Err(RsnugError::VaultNotOverwritable(path.to_path_buf()));
-        }
-        recipient_for(key_file, new_key, identities)?
-    } else {
-        recipient_from_key_file(key_file, new_key)?
+    let recipient = match check_target(path, key_file, force)? {
+        Some(identities) => recipient_for(key_file, new_key, identities)?,
+        None => recipient_from_key_file(key_file, new_key)?,
     };
 
     vault::save(path, &VaultData::empty(), &recipient)?;
