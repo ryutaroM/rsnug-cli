@@ -1198,7 +1198,7 @@ fn a_command_that_finds_no_vault_leaves_nothing_behind() {
 
 #[cfg(unix)]
 #[test]
-fn an_init_rsnug_refuses_leaves_nothing_behind() {
+fn an_init_refused_by_its_key_file_leaves_no_directory_behind() {
     let dir = tempfile::tempdir().expect("tempdir");
     let key = dir.path().join("key");
     write_key(&key);
@@ -1216,7 +1216,7 @@ fn an_init_rsnug_refuses_leaves_nothing_behind() {
 }
 
 #[test]
-fn an_init_with_an_unreadable_key_file_creates_no_directory() {
+fn an_init_with_an_invalid_key_file_creates_no_directory() {
     let dir = tempfile::tempdir().expect("tempdir");
     let key = dir.path().join("key");
     std::fs::write(&key, "not an age identity\n").expect("write key");
@@ -1229,7 +1229,30 @@ fn an_init_with_an_unreadable_key_file_creates_no_directory() {
     assert_eq!(code(&output), 4, "{}", stderr(&output));
     assert!(
         !root.exists(),
-        "a key file rsnug cannot read must stop init before it creates anything"
+        "a key file that is not an age identity must stop init before it creates anything"
+    );
+}
+
+#[test]
+fn init_refuses_a_vault_that_appeared_while_it_waited_for_the_lock() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("vault.age");
+    let key = dir.path().join("key");
+    let planted = dir.path().join("planted.age");
+    init_vault(&planted, &key);
+    let held = hold_lock(&vault);
+
+    let child = spawn(&mut scoped(&["init"], &vault, &key));
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    std::fs::copy(&planted, &vault).expect("plant a vault under the waiting init");
+    drop(held);
+    let output = child.wait_with_output().expect("failed to wait for rsnug");
+
+    assert_eq!(code(&output), 1, "{}", stderr(&output));
+    assert_eq!(
+        std::fs::read(&vault).expect("read vault"),
+        std::fs::read(&planted).expect("read planted"),
+        "a vault written while init waited on the lock must survive it"
     );
 }
 
