@@ -40,8 +40,20 @@ pub fn sync_parent(path: &Path) -> Result<(), RsnugError> {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
     };
-    std::fs::File::open(parent)?.sync_all()?;
-    Ok(())
+    match std::fs::File::open(parent)?.sync_all() {
+        Err(err) if !flush_unsupported(&err) => Err(RsnugError::Io(err)),
+        _ => Ok(()),
+    }
+}
+
+// A filesystem that cannot flush a directory still renamed the file; failing
+// here would report a write that landed as a write that did not.
+#[cfg(unix)]
+fn flush_unsupported(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::Unsupported | std::io::ErrorKind::InvalidInput
+    )
 }
 
 #[cfg(not(unix))]
@@ -209,6 +221,19 @@ mod tests {
             .map(|entry| entry.expect("entry").path())
             .collect();
         assert_eq!(entries, vec![path]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_filesystem_without_a_flush_is_not_a_failed_write() {
+        use std::io::{Error, ErrorKind};
+
+        assert!(flush_unsupported(&Error::from(ErrorKind::Unsupported)));
+        assert!(flush_unsupported(&Error::from(ErrorKind::InvalidInput)));
+        assert!(!flush_unsupported(&Error::from(
+            ErrorKind::PermissionDenied
+        )));
+        assert!(!flush_unsupported(&Error::from(ErrorKind::OutOfMemory)));
     }
 
     #[test]
