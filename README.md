@@ -150,7 +150,7 @@ All diagnostic messages and errors go to stderr. stdout carries only the command
 | 1 | general error (I/O failure, `init` without `--force` on an existing vault, etc.) |
 | 2 | usage error (missing/conflicting arguments, unknown command) |
 | 3 | key does not exist |
-| 4 | vault is uninitialized, the key file is missing/loose-permissioned/malformed, the key does not open the vault, or the vault still uses a passphrase and needs `migrate` |
+| 4 | vault is uninitialized, the vault path is not a file or cannot be read, the key file is missing/loose-permissioned/malformed, the key does not open the vault, or the vault still uses a passphrase and needs `migrate` |
 | 5 | another rsnug process holds the vault lock and the wait timed out (retry) |
 
 ### Concurrent writes are serialized

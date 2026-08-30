@@ -49,8 +49,16 @@ pub fn prepare_parent(path: &Path) -> Result<(), RsnugError> {
     else {
         return Ok(());
     };
-    if parent.exists() {
-        return Ok(());
+    match std::fs::metadata(parent) {
+        Ok(metadata) if metadata.is_dir() => return Ok(()),
+        Ok(_) => {
+            return Err(RsnugError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotADirectory,
+                format!("{} is not a directory", parent.display()),
+            )));
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(RsnugError::Io(err)),
     }
     std::fs::create_dir_all(parent)?;
     set_private_permissions(parent, 0o700)
@@ -178,6 +186,20 @@ mod tests {
     #[test]
     fn prepare_parent_accepts_a_bare_relative_name() {
         assert!(prepare_parent(Path::new("mykey")).is_ok());
+    }
+
+    #[test]
+    fn prepare_parent_refuses_a_parent_that_is_not_a_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"payload").expect("write");
+
+        match prepare_parent(&file.join("key")) {
+            Err(RsnugError::Io(err)) => {
+                assert_eq!(err.kind(), std::io::ErrorKind::NotADirectory);
+            }
+            other => panic!("expected NotADirectory, got {other:?}"),
+        }
     }
 
     #[cfg(unix)]

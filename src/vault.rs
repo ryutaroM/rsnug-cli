@@ -96,14 +96,23 @@ pub fn is_decryptable(
     }
 }
 
-fn read_vault(path: &Path) -> Result<Vec<u8>, RsnugError> {
-    match std::fs::read(path) {
-        Ok(bytes) => Ok(bytes),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            Err(RsnugError::VaultNotFound(path.to_path_buf()))
-        }
-        Err(err) => Err(RsnugError::Io(err)),
+pub fn exists(path: &Path) -> Result<bool, RsnugError> {
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => Ok(true),
+        Ok(_) => Err(RsnugError::VaultNotAFile(path.to_path_buf())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(RsnugError::VaultUnreadable(path.to_path_buf(), err)),
     }
+}
+
+fn read_vault(path: &Path) -> Result<Vec<u8>, RsnugError> {
+    if !exists(path)? {
+        return Err(RsnugError::VaultNotFound(path.to_path_buf()));
+    }
+    std::fs::read(path).map_err(|err| match err.kind() {
+        std::io::ErrorKind::NotFound => RsnugError::VaultNotFound(path.to_path_buf()),
+        _ => RsnugError::VaultUnreadable(path.to_path_buf(), err),
+    })
 }
 
 fn parse(plaintext: &[u8]) -> Result<VaultData, RsnugError> {
