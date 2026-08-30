@@ -1,4 +1,5 @@
 use crate::error::RsnugError;
+use crate::fsutil;
 use crate::key;
 use crate::lock;
 use crate::vault::{self, VaultData};
@@ -22,11 +23,10 @@ pub enum GetOutcome {
 }
 
 fn require_vault(path: &Path) -> Result<(), RsnugError> {
-    match std::fs::metadata(path) {
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            Err(RsnugError::VaultNotFound(path.to_path_buf()))
-        }
-        _ => Ok(()),
+    if vault::exists(path)? {
+        Ok(())
+    } else {
+        Err(RsnugError::VaultNotFound(path.to_path_buf()))
     }
 }
 
@@ -36,7 +36,7 @@ enum Target {
 }
 
 fn init_target(path: &Path, key_file: &Path, force: bool) -> Result<Target, RsnugError> {
-    if !path.exists() {
+    if !vault::exists(path)? {
         return match key::load(key_file) {
             Ok(_) | Err(RsnugError::KeyFileNotFound(_)) => Ok(Target::Fresh),
             Err(err) => Err(err),
@@ -58,6 +58,7 @@ pub fn init(
     force: bool,
     new_key: bool,
 ) -> Result<InitOutcome, RsnugError> {
+    let path = &fsutil::resolve(path)?;
     init_target(path, key_file, force)?;
     let _lock = lock::acquire(path)?;
     let recipient = match init_target(path, key_file, force)? {
@@ -108,6 +109,7 @@ pub fn migrate(
     key_file: &Path,
     passphrase: &SecretString,
 ) -> Result<MigrateOutcome, RsnugError> {
+    let path = &fsutil::resolve(path)?;
     require_vault(path)?;
     let _lock = lock::acquire(path)?;
     if !vault::is_legacy(path)? {
@@ -145,6 +147,7 @@ pub fn set(
     key: String,
     value: SecretString,
 ) -> Result<(), RsnugError> {
+    let path = &fsutil::resolve(path)?;
     require_vault(path)?;
     let _lock = lock::acquire(path)?;
     let (mut data, recipient) = vault::load(path, identities)?;
@@ -158,6 +161,7 @@ pub fn get(
     key: &str,
     reveal: bool,
 ) -> Result<GetOutcome, RsnugError> {
+    let path = &fsutil::resolve(path)?;
     let (data, _) = vault::load(path, identities)?;
     let value = data
         .get(key)
@@ -180,6 +184,7 @@ pub fn unset(
     identities: &[age::x25519::Identity],
     key: &str,
 ) -> Result<(), RsnugError> {
+    let path = &fsutil::resolve(path)?;
     require_vault(path)?;
     let _lock = lock::acquire(path)?;
     let (mut data, recipient) = vault::load(path, identities)?;
@@ -190,6 +195,103 @@ pub fn unset(
 }
 
 pub fn list(path: &Path, identities: &[age::x25519::Identity]) -> Result<Vec<String>, RsnugError> {
+    let path = &fsutil::resolve(path)?;
     let (data, _) = vault::load(path, identities)?;
     Ok(data.keys().map(str::to_owned).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::exit;
+
+    fn assert_vault_unavailable(err: RsnugError, path: &Path, needle: &str) {
+        assert_eq!(err.exit_code(), exit::VAULT_UNAVAILABLE, "{err}");
+        let message = err.to_string();
+        assert!(message.contains(needle), "{message}");
+        assert!(message.contains(&path.display().to_string()), "{message}");
+    }
+
+    #[test]
+    fn a_missing_vault_is_reported_as_not_found() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = dir.path().join("vault.age");
+
+        match require_vault(&vault) {
+            Err(err @ RsnugError::VaultNotFound(_)) => {
+                assert_vault_unavailable(err, &vault, "vault not found")
+            }
+            other => panic!("expected VaultNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_existing_vault_file_is_accepted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = dir.path().join("vault.age");
+        std::fs::write(&vault, b"ciphertext").expect("write");
+
+        require_vault(&vault).expect("an existing vault file is a vault");
+    }
+
+    #[test]
+    fn a_directory_is_not_a_vault() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = dir.path().join("vault.age");
+        std::fs::create_dir(&vault).expect("create dir");
+
+        match require_vault(&vault) {
+            Err(err @ RsnugError::VaultNotAFile(_)) => {
+                assert_vault_unavailable(err, &vault, "is not a file")
+            }
+            other => panic!("expected VaultNotAFile, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_vault_path_no_user_can_inspect_is_reported_as_unreadable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("not-a-directory");
+        std::fs::write(&file, b"payload").expect("write");
+        let vault = file.join("vault.age");
+
+        match require_vault(&vault) {
+            Err(err @ RsnugError::VaultUnreadable(_, _)) => {
+                assert_vault_unavailable(err, &vault, "cannot be read")
+            }
+            other => panic!("expected VaultUnreadable, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_vault_behind_a_directory_rsnug_cannot_enter_is_reported_as_unreadable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let blocked = dir.path().join("blocked");
+        std::fs::create_dir(&blocked).expect("create dir");
+        let vault = blocked.join("vault.age");
+        std::fs::write(&vault, b"ciphertext").expect("write");
+        crate::fsutil::set_private_permissions(&blocked, 0o000).expect("chmod");
+
+        let denied = matches!(
+            std::fs::metadata(&vault),
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied
+        );
+        let result = require_vault(&vault);
+        crate::fsutil::set_private_permissions(&blocked, 0o700).expect("chmod");
+
+        if !denied {
+            eprintln!(
+                "SKIP: this user traverses a mode-000 directory (root?); \
+                 a_vault_path_no_user_can_inspect_is_reported_as_unreadable covers the contract"
+            );
+            return;
+        }
+        match result {
+            Err(err @ RsnugError::VaultUnreadable(_, _)) => {
+                assert_vault_unavailable(err, &vault, "cannot be read")
+            }
+            other => panic!("expected VaultUnreadable, got {other:?}"),
+        }
+    }
 }

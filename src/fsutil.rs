@@ -2,6 +2,46 @@ use crate::error::RsnugError;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+// One vault must have one name, or two spellings of it write past each other
+// and take two different locks. A vault that is not there yet is placed in its
+// resolved directory, and a link to one is followed to where it points.
+pub fn resolve(path: &Path) -> Result<PathBuf, RsnugError> {
+    match path.canonicalize() {
+        Ok(resolved) => Ok(resolved),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => resolve_missing(path, err),
+        Err(err) => Err(RsnugError::Io(err)),
+    }
+}
+
+fn resolve_missing(path: &Path, missing: std::io::Error) -> Result<PathBuf, RsnugError> {
+    let Some(name) = path.file_name() else {
+        return Err(RsnugError::Io(missing));
+    };
+    let placed = resolve_dir(parent_of(path))?.join(name);
+    match placed.read_link() {
+        Ok(target) => resolve(&parent_of(&placed).join(target)),
+        Err(_) => Ok(placed),
+    }
+}
+
+fn resolve_dir(dir: &Path) -> Result<PathBuf, RsnugError> {
+    match dir.canonicalize() {
+        Ok(resolved) => Ok(resolved),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => match dir.file_name() {
+            Some(name) => Ok(resolve_dir(parent_of(dir))?.join(name)),
+            None => Err(RsnugError::Io(err)),
+        },
+        Err(err) => Err(RsnugError::Io(err)),
+    }
+}
+
+fn parent_of(path: &Path) -> &Path {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    }
+}
+
 pub fn prepare_parent(path: &Path) -> Result<(), RsnugError> {
     let Some(parent) = path
         .parent()
@@ -9,8 +49,16 @@ pub fn prepare_parent(path: &Path) -> Result<(), RsnugError> {
     else {
         return Ok(());
     };
-    if parent.exists() {
-        return Ok(());
+    match std::fs::metadata(parent) {
+        Ok(metadata) if metadata.is_dir() => return Ok(()),
+        Ok(_) => {
+            return Err(RsnugError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotADirectory,
+                format!("{} is not a directory", parent.display()),
+            )));
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(RsnugError::Io(err)),
     }
     std::fs::create_dir_all(parent)?;
     set_private_permissions(parent, 0o700)
@@ -36,11 +84,7 @@ pub fn create_private_atomic(path: &Path, bytes: &[u8]) -> Result<(), RsnugError
 // A renamed file is only durable once the directory entry itself reaches disk.
 #[cfg(unix)]
 pub fn sync_parent(path: &Path) -> Result<(), RsnugError> {
-    let parent = match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent,
-        _ => Path::new("."),
-    };
-    match std::fs::File::open(parent)?.sync_all() {
+    match std::fs::File::open(parent_of(path))?.sync_all() {
         Err(err) if !flush_unsupported(&err) => Err(RsnugError::Io(err)),
         _ => Ok(()),
     }
@@ -142,6 +186,20 @@ mod tests {
     #[test]
     fn prepare_parent_accepts_a_bare_relative_name() {
         assert!(prepare_parent(Path::new("mykey")).is_ok());
+    }
+
+    #[test]
+    fn prepare_parent_refuses_a_parent_that_is_not_a_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"payload").expect("write");
+
+        match prepare_parent(&file.join("key")) {
+            Err(RsnugError::Io(err)) => {
+                assert_eq!(err.kind(), std::io::ErrorKind::NotADirectory);
+            }
+            other => panic!("expected NotADirectory, got {other:?}"),
+        }
     }
 
     #[cfg(unix)]
@@ -272,5 +330,92 @@ mod tests {
     #[cfg(not(unix))]
     fn mode_of(_path: &Path) -> u32 {
         0o700
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_follows_a_link_to_the_vault_it_points_at() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = dir.path().join("vault.age");
+        std::fs::write(&vault, b"vault").expect("write");
+        let alias = dir.path().join("alias.age");
+        std::os::unix::fs::symlink(&vault, &alias).expect("symlink");
+
+        assert_eq!(
+            resolve(&alias).expect("resolve"),
+            resolve(&vault).expect("resolve"),
+            "a link and its target are one vault, so they must resolve to one name"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_follows_a_link_to_a_vault_that_does_not_exist_yet() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = dir.path().join("vault.age");
+        let alias = dir.path().join("alias.age");
+        std::os::unix::fs::symlink(&vault, &alias).expect("symlink");
+
+        assert_eq!(
+            resolve(&alias).expect("resolve"),
+            resolve(&vault).expect("resolve"),
+            "init writes through a link that points at nothing yet, and must not replace it"
+        );
+        assert!(!vault.exists(), "resolving must not create anything");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_spells_a_linked_directory_the_way_the_directory_itself_is_spelled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).expect("create dir");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        assert_eq!(
+            resolve(&link.join("vault.age")).expect("resolve"),
+            resolve(&real.join("vault.age")).expect("resolve"),
+            "one vault reached through two directory names must be written under one name"
+        );
+    }
+
+    #[test]
+    fn resolve_gives_a_bare_name_the_path_it_stands_for() {
+        let here = std::env::current_dir()
+            .expect("cwd")
+            .canonicalize()
+            .expect("canonicalize");
+
+        assert_eq!(
+            resolve(Path::new("vault.age")).expect("resolve"),
+            here.join("vault.age")
+        );
+    }
+
+    #[test]
+    fn resolve_keeps_a_name_whose_directory_is_not_there_yet() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let nested = dir.path().join("fresh").join("vault.age");
+
+        assert_eq!(
+            resolve(&nested).expect("resolve"),
+            dir.path()
+                .canonicalize()
+                .expect("canonicalize")
+                .join("fresh")
+                .join("vault.age"),
+            "init must reach a vault under a directory it has yet to create"
+        );
+        assert!(!dir.path().join("fresh").exists());
+    }
+
+    #[test]
+    fn resolve_reports_a_name_it_cannot_place() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.age");
+        drop(dir);
+
+        assert!(resolve(&path.join("..")).is_err());
     }
 }

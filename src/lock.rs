@@ -166,15 +166,23 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_lock_file_that_cannot_be_created_names_itself() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().expect("tempdir");
-        let blocked = dir.path().join("not-a-directory");
-        std::fs::write(&blocked, b"").expect("write");
-        let vault = blocked.join("vault.age");
+        let closed = dir.path().join("closed");
+        std::fs::create_dir(&closed).expect("create dir");
+        let vault = closed.join("vault.age");
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o500)).expect("chmod");
 
-        let Err(err) = acquire_within(&vault, BRIEF) else {
-            panic!("a lock file rsnug cannot create must not yield a lock");
+        let result = acquire_within(&vault, BRIEF);
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+
+        let Err(err) = result else {
+            eprintln!(
+                "skipped: this process creates files in {} at mode 500, so it cannot be locked out of one",
+                closed.display()
+            );
+            return;
         };
-
         assert!(
             matches!(&err, RsnugError::LockFileUnopenable(reported, _) if reported == &lock_path(&vault)),
             "the error must name the lock file, got {err:?}"

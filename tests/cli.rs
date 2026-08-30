@@ -71,17 +71,17 @@ fn init_vault(vault: &Path, key: &Path) {
 fn write_key(path: &Path) {
     let identity = age::x25519::Identity::generate();
     std::fs::write(path, format!("{}\n", identity.to_string().expose_secret())).expect("write key");
-    set_key_mode(path, 0o600);
+    set_mode(path, 0o600);
 }
 
 #[cfg(unix)]
-fn set_key_mode(path: &Path, mode: u32) {
+fn set_mode(path: &Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("chmod");
 }
 
 #[cfg(not(unix))]
-fn set_key_mode(_path: &Path, _mode: u32) {}
+fn set_mode(_path: &Path, _mode: u32) {}
 
 fn legacy_vault(path: &Path, passphrase: &str, entries: &str) {
     use std::io::Write;
@@ -126,6 +126,113 @@ fn assert_lists_commands(text: &str) {
             "help should list `{command}`: {text}"
         );
     }
+}
+
+const VAULT_PATH_COMMANDS: [&[&str]; 6] = [
+    &["set", "KEY", "VALUE"],
+    &["unset", "KEY"],
+    &["get", "KEY"],
+    &["list"],
+    &["init"],
+    &["init", "--force"],
+];
+
+fn assert_vault_unavailable(output: &Output, vault: &Path, needle: &str, args: &[&str]) {
+    let message = stderr(output);
+    assert_eq!(code(output), 4, "{args:?}: {message}");
+    assert_eq!(stdout(output), "", "{args:?}");
+    assert!(message.contains(needle), "{args:?}: {message}");
+    assert!(
+        message.contains(vault.to_str().expect("utf-8 path")),
+        "{args:?}: {message}"
+    );
+}
+
+fn assert_every_command_rejects(vault: &Path, key: &Path, needle: &str) {
+    for args in VAULT_PATH_COMMANDS {
+        let output = run_with_vault(args, vault, key);
+        assert_vault_unavailable(&output, vault, needle, args);
+    }
+}
+
+#[test]
+fn every_command_rejects_a_vault_that_is_a_directory() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("vault.age");
+    let key = dir.path().join("key");
+    write_key(&key);
+    std::fs::create_dir(&vault).expect("create dir");
+
+    assert_every_command_rejects(&vault, &key, "is not a file");
+}
+
+#[test]
+fn every_command_rejects_a_vault_path_no_user_can_inspect() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let key = dir.path().join("key");
+    write_key(&key);
+    let file = dir.path().join("not-a-directory");
+    std::fs::write(&file, b"payload").expect("write");
+
+    assert_every_command_rejects(&file.join("vault.age"), &key, "cannot be read");
+}
+
+#[cfg(unix)]
+#[test]
+fn every_command_rejects_a_vault_behind_a_directory_it_cannot_enter() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let key = dir.path().join("key");
+    write_key(&key);
+    let blocked = dir.path().join("blocked");
+    let vault = blocked.join("inner").join("vault.age");
+    std::fs::create_dir_all(vault.parent().expect("parent")).expect("create dir");
+    set_mode(&blocked, 0o000);
+
+    let denied = matches!(
+        std::fs::metadata(&vault),
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied
+    );
+    if !denied {
+        set_mode(&blocked, 0o700);
+        eprintln!(
+            "SKIP: this user traverses a mode-000 directory (root?); \
+             asserting the same contract on a path no user can inspect instead"
+        );
+        let file = dir.path().join("not-a-directory");
+        std::fs::write(&file, b"payload").expect("write");
+        assert_every_command_rejects(&file.join("vault.age"), &key, "cannot be read");
+        return;
+    }
+
+    let outputs: Vec<Output> = VAULT_PATH_COMMANDS
+        .iter()
+        .map(|args| run_with_vault(args, &vault, &key))
+        .collect();
+    set_mode(&blocked, 0o700);
+
+    for (args, output) in VAULT_PATH_COMMANDS.iter().zip(&outputs) {
+        assert_vault_unavailable(output, &vault, "cannot be read", args);
+    }
+}
+
+#[test]
+fn every_reading_command_reports_a_missing_vault_and_init_creates_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("vault.age");
+    let key = dir.path().join("key");
+    write_key(&key);
+
+    for args in [
+        &["set", "KEY", "VALUE"][..],
+        &["unset", "KEY"][..],
+        &["get", "KEY"][..],
+        &["list"][..],
+    ] {
+        let output = run_with_vault(args, &vault, &key);
+        assert_vault_unavailable(&output, &vault, "vault not found", args);
+    }
+
+    assert_eq!(code(&run_with_vault(&["init"], &vault, &key)), 0);
 }
 
 #[test]
@@ -402,8 +509,7 @@ fn init_with_force_on_an_unreadable_vault_does_not_blame_the_key() {
 
     let output = run_with_vault(&["init", "--force"], &vault, &key);
 
-    assert_eq!(code(&output), 1);
-    assert_eq!(stdout(&output), "");
+    assert_vault_unavailable(&output, &vault, "is not a file", &["init", "--force"]);
     assert!(
         !stderr(&output).contains("key file"),
         "an unreadable vault path is not a key problem: {}",
@@ -775,7 +881,7 @@ fn writing_to_a_vault_does_not_rebind_it_to_another_identity() {
 
     let only_first = dir.path().join("only-first");
     std::fs::write(&only_first, format!("{}\n", secrets[0])).expect("write");
-    set_key_mode(&only_first, 0o600);
+    set_mode(&only_first, 0o600);
 
     assert_ne!(
         code(&run_with_vault(&["list"], &second, &only_first)),
@@ -791,7 +897,7 @@ fn a_group_readable_key_file_is_rejected() {
     let vault = dir.path().join("vault.age");
     let key = dir.path().join("key");
     init_vault(&vault, &key);
-    set_key_mode(&key, 0o644);
+    set_mode(&key, 0o644);
 
     let output = run_with_vault(&["list"], &vault, &key);
 
@@ -902,7 +1008,7 @@ fn migrate_that_stops_at_the_key_file_leaves_no_backup_behind() {
     let key = dir.path().join("key");
     legacy_vault(&vault, "pw", r#"{"KEY":"VALUE"}"#);
     write_key(&key);
-    set_key_mode(&key, 0o644);
+    set_mode(&key, 0o644);
 
     let refused = run_with_passphrase(&["migrate"], &vault, &key, "pw");
 
@@ -913,7 +1019,7 @@ fn migrate_that_stops_at_the_key_file_leaves_no_backup_behind() {
         "a migrate that never rewrote the vault must not leave a backup that blocks the retry"
     );
 
-    set_key_mode(&key, 0o600);
+    set_mode(&key, 0o600);
     let retried = run_with_passphrase(&["migrate"], &vault, &key, "pw");
 
     assert_eq!(code(&retried), 0, "{}", stderr(&retried));
@@ -1174,7 +1280,7 @@ fn a_lock_file_the_owner_cannot_open_points_at_itself() {
     let key = dir.path().join("key");
     init_vault(&vault, &key);
     let lock = dir.path().join("vault.age.lock");
-    set_key_mode(&lock, 0o000);
+    set_mode(&lock, 0o000);
     if std::fs::File::open(&lock).is_ok() {
         eprintln!("skipped: this process opens {} at mode 000", lock.display());
         return;
@@ -1247,7 +1353,7 @@ fn an_init_refused_by_its_key_file_leaves_no_directory_behind() {
     let dir = tempfile::tempdir().expect("tempdir");
     let key = dir.path().join("key");
     write_key(&key);
-    set_key_mode(&key, 0o644);
+    set_mode(&key, 0o644);
     let root = dir.path().join("root");
     let vault = root.join("nested").join("vault.age");
 
@@ -1265,7 +1371,7 @@ fn an_init_with_an_invalid_key_file_creates_no_directory() {
     let dir = tempfile::tempdir().expect("tempdir");
     let key = dir.path().join("key");
     std::fs::write(&key, "not an age identity\n").expect("write key");
-    set_key_mode(&key, 0o600);
+    set_mode(&key, 0o600);
     let root = dir.path().join("root");
     let vault = root.join("nested").join("vault.age");
 
@@ -1332,5 +1438,93 @@ fn concurrent_inits_share_one_key_file() {
     assert_eq!(
         code(&run_with_vault(&["set", "KEY", "VALUE"], &second, &key)),
         0
+    );
+}
+
+#[cfg(unix)]
+fn linked_vault(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let store = dir.join("store");
+    std::fs::create_dir(&store).expect("create dir");
+    let vault = store.join("vault.age");
+    let alias = dir.join("alias.age");
+    std::os::unix::fs::symlink(&vault, &alias).expect("symlink");
+    (vault, alias)
+}
+
+#[cfg(unix)]
+fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .expect("symlink metadata")
+        .file_type()
+        .is_symlink()
+}
+
+#[cfg(unix)]
+#[test]
+fn a_set_through_a_symlink_lands_on_the_vault_it_points_at() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let key = dir.path().join("key");
+    let (vault, alias) = linked_vault(dir.path());
+    init_vault(&vault, &key);
+    let before = std::fs::read(&vault).expect("read vault");
+
+    assert_eq!(
+        code(&run_with_vault(&["set", "KEY", "VALUE"], &alias, &key)),
+        0
+    );
+
+    assert!(
+        is_symlink(&alias),
+        "a write through a link must leave the link a link"
+    );
+    assert_ne!(
+        std::fs::read(&vault).expect("read vault"),
+        before,
+        "a write through a link must land on the vault the link points at"
+    );
+    assert_eq!(run_ok(&["get", "KEY", "--reveal"], &vault, &key), "VALUE\n");
+    assert_eq!(
+        run_ok(&["list"], &alias, &key),
+        run_ok(&["list"], &vault, &key),
+        "two names for one vault must list the same keys"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_init_through_a_symlink_creates_the_vault_it_points_at() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let key = dir.path().join("key");
+    let (vault, alias) = linked_vault(dir.path());
+
+    assert_eq!(code(&run_with_vault(&["init"], &alias, &key)), 0);
+
+    assert!(
+        is_symlink(&alias),
+        "an init through a link must leave the link a link"
+    );
+    assert!(
+        vault.exists(),
+        "an init through a link must create the vault the link points at"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_write_through_a_symlink_waits_on_the_lock_of_the_vault_it_points_at() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let key = dir.path().join("key");
+    let (vault, alias) = linked_vault(dir.path());
+    init_vault(&vault, &key);
+
+    let held = hold_lock(&vault);
+    let output = run_with_vault(&["set", "KEY", "VALUE"], &alias, &key);
+    drop(held);
+
+    assert_eq!(
+        code(&output),
+        5,
+        "one vault under two names must have one lock: {}",
+        stderr(&output)
     );
 }
