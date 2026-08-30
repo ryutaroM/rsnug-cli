@@ -1287,6 +1287,51 @@ fn a_restrictive_umask_does_not_wedge_the_lock_file() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn a_lock_file_the_owner_cannot_open_points_at_itself() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("vault.age");
+    let key = dir.path().join("key");
+    init_vault(&vault, &key);
+    let lock = dir.path().join("vault.age.lock");
+    set_mode(&lock, 0o000);
+    if std::fs::File::open(&lock).is_ok() {
+        eprintln!("skipped: this process opens {} at mode 000", lock.display());
+        return;
+    }
+
+    let output = run_with_vault(&["set", "KEY", "VALUE"], &vault, &key);
+
+    assert_eq!(code(&output), 4, "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("vault.age.lock"),
+        "a user cannot fix a lock file the message never names: {}",
+        stderr(&output)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_lock_path_that_leads_nowhere_points_at_itself() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("vault.age");
+    let key = dir.path().join("key");
+    init_vault(&vault, &key);
+    let lock = dir.path().join("vault.age.lock");
+    std::fs::remove_file(&lock).expect("remove lock file");
+    std::os::unix::fs::symlink(dir.path().join("gone"), &lock).expect("symlink");
+
+    let output = run_with_vault(&["set", "KEY", "VALUE"], &vault, &key);
+
+    assert_eq!(code(&output), 4, "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("vault.age.lock"),
+        "a user cannot fix a lock file the message never names: {}",
+        stderr(&output)
+    );
+}
+
 #[test]
 fn a_command_that_finds_no_vault_leaves_nothing_behind() {
     let dir = tempfile::tempdir().expect("tempdir");

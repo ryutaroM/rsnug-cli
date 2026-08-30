@@ -150,7 +150,7 @@ All diagnostic messages and errors go to stderr. stdout carries only the command
 | 1 | general error (I/O failure, `init` without `--force` on an existing vault, etc.) |
 | 2 | usage error (missing/conflicting arguments, unknown command) |
 | 3 | key does not exist |
-| 4 | vault is uninitialized, the vault path is not a file or cannot be read, the key file is missing/loose-permissioned/malformed, the key does not open the vault, or the vault still uses a passphrase and needs `migrate` |
+| 4 | vault is uninitialized, the vault path is not a file or cannot be read, the key file is missing/loose-permissioned/malformed, the key does not open the vault, the lock file beside the vault cannot be opened, or the vault still uses a passphrase and needs `migrate` |
 | 5 | another rsnug process holds the vault lock and the wait timed out (retry) |
 
 ### Concurrent writes are serialized
@@ -159,7 +159,7 @@ Every command that changes the vault — `set`, `unset`, `init`, `migrate` — h
 
 Every command resolves `--vault` once before it touches anything, so two names for one vault take one lock and write one file. A symlink is followed to the file it points at: `--vault ~/link.age` reads, locks and rewrites the `store/vault.age` behind it, and leaves the link a link. The lock and the `migrate` backup are placed beside the resolved vault, not beside the name you typed.
 
-The lock is an empty sidecar file next to that vault, `<vault>.lock`, held with `flock(2)` (`LockFileEx` on Windows). The kernel releases it when the process exits, so a crashed or killed rsnug never strands the vault and there is no stale lock to clear by hand. The file itself is never deleted — unlinking it would let the next process lock a different inode — so `vault.age.lock` stays beside `vault.age` for good. It holds nothing; removing it while no rsnug is running is harmless.
+The lock is an empty sidecar file next to that vault, `<vault>.lock`, held with `flock(2)` (`LockFileEx` on Windows). The kernel releases it when the process exits, so a crashed or killed rsnug never strands the vault and there is no stale lock to clear by hand. The file itself is never deleted — unlinking it would let the next process lock a different inode — so `vault.age.lock` stays beside `vault.age` for good. It holds nothing; removing it while no rsnug is running is harmless. Because it outlives the process that made it, a lock file written by another user — a `sudo rsnug set` on a shared vault leaves one owned by root — can shut everyone else out even though the vault stays writable, so rsnug names that file in the error and exits 4 instead of reporting a bare permission failure.
 
 A command that cannot take the lock retries for 5 seconds and then exits 5 instead of hanging. A vault write takes milliseconds, so exhausting that wait means an unusual pile-up of writers, and exit 5 is always worth retrying.
 

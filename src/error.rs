@@ -19,6 +19,7 @@ pub enum RsnugError {
     VaultNotAFile(PathBuf),
     VaultUnreadable(PathBuf, std::io::Error),
     VaultLocked(PathBuf),
+    LockFileUnopenable(PathBuf, std::io::Error),
     DecryptionFailed,
     KeyNotFound(String),
     UnsupportedVaultVersion { found: u32, expected: u32 },
@@ -40,6 +41,7 @@ impl RsnugError {
             RsnugError::VaultNotOverwritable(_) => exit::VAULT_UNAVAILABLE,
             RsnugError::VaultNotAFile(_) => exit::VAULT_UNAVAILABLE,
             RsnugError::VaultUnreadable(_, _) => exit::VAULT_UNAVAILABLE,
+            RsnugError::LockFileUnopenable(_, _) => exit::VAULT_UNAVAILABLE,
             RsnugError::DecryptionFailed => exit::VAULT_UNAVAILABLE,
             RsnugError::KeyFileAlreadyExists(_) => exit::GENERAL_ERROR,
             RsnugError::VaultAlreadyMigrated(_) => exit::GENERAL_ERROR,
@@ -143,6 +145,16 @@ impl fmt::Display for RsnugError {
                     path.display(),
                     crate::lock::WAIT.as_secs()
                 )
+            }
+            RsnugError::LockFileUnopenable(path, err) => {
+                write!(f, "lock file {} cannot be opened: {err}", path.display())?;
+                if err.kind() == std::io::ErrorKind::PermissionDenied {
+                    write!(
+                        f,
+                        " (fix its owner and mode, or remove it once no rsnug is running)"
+                    )?;
+                }
+                Ok(())
             }
             RsnugError::DecryptionFailed => {
                 write!(f, "failed to decrypt vault (wrong key or corrupt file)")
