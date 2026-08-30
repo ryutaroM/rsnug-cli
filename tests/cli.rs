@@ -1289,3 +1289,91 @@ fn concurrent_inits_share_one_key_file() {
         0
     );
 }
+
+#[cfg(unix)]
+fn linked_vault(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let store = dir.join("store");
+    std::fs::create_dir(&store).expect("create dir");
+    let vault = store.join("vault.age");
+    let alias = dir.join("alias.age");
+    std::os::unix::fs::symlink(&vault, &alias).expect("symlink");
+    (vault, alias)
+}
+
+#[cfg(unix)]
+fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .expect("symlink metadata")
+        .file_type()
+        .is_symlink()
+}
+
+#[cfg(unix)]
+#[test]
+fn a_set_through_a_symlink_lands_on_the_vault_it_points_at() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let key = dir.path().join("key");
+    let (vault, alias) = linked_vault(dir.path());
+    init_vault(&vault, &key);
+    let before = std::fs::read(&vault).expect("read vault");
+
+    assert_eq!(
+        code(&run_with_vault(&["set", "KEY", "VALUE"], &alias, &key)),
+        0
+    );
+
+    assert!(
+        is_symlink(&alias),
+        "a write through a link must leave the link a link"
+    );
+    assert_ne!(
+        std::fs::read(&vault).expect("read vault"),
+        before,
+        "a write through a link must land on the vault the link points at"
+    );
+    assert_eq!(run_ok(&["get", "KEY", "--reveal"], &vault, &key), "VALUE\n");
+    assert_eq!(
+        run_ok(&["list"], &alias, &key),
+        run_ok(&["list"], &vault, &key),
+        "two names for one vault must list the same keys"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_init_through_a_symlink_creates_the_vault_it_points_at() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let key = dir.path().join("key");
+    let (vault, alias) = linked_vault(dir.path());
+
+    assert_eq!(code(&run_with_vault(&["init"], &alias, &key)), 0);
+
+    assert!(
+        is_symlink(&alias),
+        "an init through a link must leave the link a link"
+    );
+    assert!(
+        vault.exists(),
+        "an init through a link must create the vault the link points at"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_write_through_a_symlink_waits_on_the_lock_of_the_vault_it_points_at() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let key = dir.path().join("key");
+    let (vault, alias) = linked_vault(dir.path());
+    init_vault(&vault, &key);
+
+    let held = hold_lock(&vault);
+    let output = run_with_vault(&["set", "KEY", "VALUE"], &alias, &key);
+    drop(held);
+
+    assert_eq!(
+        code(&output),
+        5,
+        "one vault under two names must have one lock: {}",
+        stderr(&output)
+    );
+}
