@@ -9,30 +9,36 @@ pub fn resolve(path: &Path) -> Result<PathBuf, RsnugError> {
     match path.canonicalize() {
         Ok(resolved) => Ok(resolved),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => resolve_missing(path, err),
-        Err(err) => Err(RsnugError::Io(err)),
+        Err(err) => Err(unreadable(path, err)),
     }
 }
 
 fn resolve_missing(path: &Path, missing: std::io::Error) -> Result<PathBuf, RsnugError> {
     let Some(name) = path.file_name() else {
-        return Err(RsnugError::Io(missing));
+        return Err(unreadable(path, missing));
     };
-    let placed = resolve_dir(parent_of(path))?.join(name);
+    let placed = resolve_dir(path, parent_of(path))?.join(name);
     match placed.read_link() {
         Ok(target) => resolve(&parent_of(&placed).join(target)),
         Err(_) => Ok(placed),
     }
 }
 
-fn resolve_dir(dir: &Path) -> Result<PathBuf, RsnugError> {
+fn resolve_dir(vault: &Path, dir: &Path) -> Result<PathBuf, RsnugError> {
     match dir.canonicalize() {
         Ok(resolved) => Ok(resolved),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => match dir.file_name() {
-            Some(name) => Ok(resolve_dir(parent_of(dir))?.join(name)),
-            None => Err(RsnugError::Io(err)),
+            Some(name) => Ok(resolve_dir(vault, parent_of(dir))?.join(name)),
+            None => Err(unreadable(vault, err)),
         },
-        Err(err) => Err(RsnugError::Io(err)),
+        Err(err) => Err(unreadable(vault, err)),
     }
+}
+
+// A path rsnug cannot even spell out is a vault it cannot read, not a stray
+// io failure: it must leave by the same exit as every other unusable vault.
+fn unreadable(path: &Path, err: std::io::Error) -> RsnugError {
+    RsnugError::VaultUnreadable(path.to_path_buf(), err)
 }
 
 fn parent_of(path: &Path) -> &Path {
@@ -417,5 +423,69 @@ mod tests {
         drop(dir);
 
         assert!(resolve(&path.join("..")).is_err());
+    }
+
+    #[test]
+    fn resolve_reports_a_vault_path_no_user_can_inspect() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("not-a-directory");
+        std::fs::write(&file, b"payload").expect("write");
+        let vault = file.join("vault.age");
+
+        match resolve(&vault) {
+            Err(RsnugError::VaultUnreadable(path, _)) => assert_eq!(path, vault),
+            other => panic!("expected VaultUnreadable, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_reports_a_vault_behind_a_directory_it_cannot_enter() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let blocked = dir.path().join("blocked");
+        let vault = blocked.join("inner").join("vault.age");
+        std::fs::create_dir_all(vault.parent().expect("parent")).expect("create dir");
+        set_private_permissions(&blocked, 0o000).expect("chmod");
+
+        let denied = matches!(
+            std::fs::metadata(&vault),
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied
+        );
+        let resolved = resolve(&vault);
+        set_private_permissions(&blocked, 0o700).expect("chmod");
+
+        if !denied {
+            eprintln!(
+                "SKIP: this user traverses a mode-000 directory (root?); \
+                 resolve_reports_a_vault_path_no_user_can_inspect covers the contract"
+            );
+            return;
+        }
+        match resolved {
+            Err(RsnugError::VaultUnreadable(path, _)) => assert_eq!(path, vault),
+            other => panic!("expected VaultUnreadable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_reports_a_path_that_names_no_vault() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = dir.path().join("missing").join("..");
+
+        match resolve(&vault) {
+            Err(RsnugError::VaultUnreadable(path, _)) => assert_eq!(path, vault),
+            other => panic!("expected VaultUnreadable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_reports_a_vault_below_a_path_that_names_no_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = dir.path().join("missing").join("..").join("vault.age");
+
+        match resolve(&vault) {
+            Err(RsnugError::VaultUnreadable(path, _)) => assert_eq!(path, vault),
+            other => panic!("expected VaultUnreadable, got {other:?}"),
+        }
     }
 }
