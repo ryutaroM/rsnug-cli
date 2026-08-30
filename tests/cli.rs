@@ -216,6 +216,21 @@ fn every_command_rejects_a_vault_behind_a_directory_it_cannot_enter() {
 }
 
 #[test]
+fn every_command_rejects_a_vault_path_that_names_nothing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let key = dir.path().join("key");
+    write_key(&key);
+    let missing = dir.path().join("missing");
+
+    assert_every_command_rejects(&missing.join(".."), &key, "cannot be read");
+    assert_every_command_rejects(
+        &missing.join("..").join("vault.age"),
+        &key,
+        "cannot be read",
+    );
+}
+
+#[test]
 fn every_reading_command_reports_a_missing_vault_and_init_creates_it() {
     let dir = tempfile::tempdir().expect("tempdir");
     let vault = dir.path().join("vault.age");

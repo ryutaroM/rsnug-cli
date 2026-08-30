@@ -15,7 +15,7 @@ pub fn resolve(path: &Path) -> Result<PathBuf, RsnugError> {
 
 fn resolve_missing(path: &Path, missing: std::io::Error) -> Result<PathBuf, RsnugError> {
     let Some(name) = path.file_name() else {
-        return Err(RsnugError::Io(missing));
+        return Err(unreadable(path, missing));
     };
     let placed = resolve_dir(path, parent_of(path))?.join(name);
     match placed.read_link() {
@@ -29,7 +29,7 @@ fn resolve_dir(vault: &Path, dir: &Path) -> Result<PathBuf, RsnugError> {
         Ok(resolved) => Ok(resolved),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => match dir.file_name() {
             Some(name) => Ok(resolve_dir(vault, parent_of(dir))?.join(name)),
-            None => Err(RsnugError::Io(err)),
+            None => Err(unreadable(vault, err)),
         },
         Err(err) => Err(unreadable(vault, err)),
     }
@@ -462,6 +462,28 @@ mod tests {
             return;
         }
         match resolved {
+            Err(RsnugError::VaultUnreadable(path, _)) => assert_eq!(path, vault),
+            other => panic!("expected VaultUnreadable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_reports_a_path_that_names_no_vault() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = dir.path().join("missing").join("..");
+
+        match resolve(&vault) {
+            Err(RsnugError::VaultUnreadable(path, _)) => assert_eq!(path, vault),
+            other => panic!("expected VaultUnreadable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_reports_a_vault_below_a_path_that_names_no_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = dir.path().join("missing").join("..").join("vault.age");
+
+        match resolve(&vault) {
             Err(RsnugError::VaultUnreadable(path, _)) => assert_eq!(path, vault),
             other => panic!("expected VaultUnreadable, got {other:?}"),
         }
